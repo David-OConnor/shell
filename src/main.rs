@@ -1,3 +1,5 @@
+mod save_data;
+
 use std::{
     borrow::Cow,
     env, io,
@@ -55,12 +57,26 @@ impl State {
         format!("S {} $ ", self.cwd.display())
     }
 
+    /// Persist user-controlled state (currently: the bookmark list) to the
+    /// given file. Called after every bookmark mutation.
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        unimplemented!()
+        let list = self
+            .dir_bookmarks
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "bookmark lock poisoned"))?;
+        save_data::save_bookmarks(&list, path)
     }
 
+    /// Restore state from disk, returning a fresh `State` with that data.
+    /// A missing file is treated as "no saved state" and yields the default
+    /// `State::new()` values (not an error).
     pub fn load(path: &Path) -> io::Result<Self> {
-        unimplemented!()
+        let bookmarks = save_data::load_bookmarks(path)?;
+        Ok(Self {
+            history: Vec::new(),
+            cwd: env::current_dir().unwrap_or_default(),
+            dir_bookmarks: Arc::new(Mutex::new(bookmarks)),
+        })
     }
 }
 
@@ -192,9 +208,11 @@ impl Helper for ShellHelper {}
 
 /// Rustyline key handler: snapshots the current working directory
 /// into the shared bookmark list. Runs inline within readline, so we use a
-/// shared Arc<Mutex<_>> rather than touching `State` directly.
+/// shared Arc<Mutex<_>> rather than touching `State` directly. Also persists
+/// the list to disk on every successful add.
 struct BookmarkHandler {
     bookmarks: Arc<Mutex<Vec<PathBuf>>>,
+    save_path: PathBuf,
 }
 
 impl ConditionalEventHandler for BookmarkHandler {
@@ -212,6 +230,9 @@ impl ConditionalEventHandler for BookmarkHandler {
                 } else {
                     println!("Added a bookmark: {}", cwd.display());
                     list.push(cwd);
+                    if let Err(e) = save_data::save_bookmarks(&list, &self.save_path) {
+                        eprintln!("warning: failed to save bookmarks: {e}");
+                    }
                 }
             }
         }
@@ -360,7 +381,14 @@ fn run_command(state: &mut State, input: &str) -> bool {
 }
 
 fn main() {
-    let mut state = State::new();
+    // Resolve the persistent-state file path, then try to load. A missing
+    // file is fine (first run); other I/O errors are reported but non-fatal.
+    let state_path = save_data::default_path()
+        .unwrap_or_else(|| PathBuf::from(save_data::FILENAME));
+    let mut state = State::load(&state_path).unwrap_or_else(|e| {
+        eprintln!("warning: failed to load saved state ({e}); starting fresh");
+        State::new()
+    });
 
     // Editor gives us: line editing, arrow-key history, Ctrl+A/E/K/W, etc.
     // We pair it with a custom Helper so Tab completes bookmark paths after
@@ -385,11 +413,12 @@ fn main() {
         fs_completer: FilenameCompleter::new(),
     }));
 
-    // Ctrl+B:  push the CWD onto state.dir_bookmarks.
+    // Ctrl+B:  push the CWD onto state.dir_bookmarks (and persist to disk).
     rl.bind_sequence(
         KeyEvent::new('b', Modifiers::CTRL),
         EventHandler::Conditional(Box::new(BookmarkHandler {
             bookmarks: state.dir_bookmarks.clone(),
+            save_path: state_path.clone(),
         })),
     );
 

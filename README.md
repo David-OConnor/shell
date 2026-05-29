@@ -39,4 +39,9 @@ git sync "A commit message"
 - Alt + B: List all bookmarks.
 - Ctrl + D: Exit
 - Ctrl + C: Exit
-- 
+
+
+
+## Application state
+Application state, including folder bookmarks, is saved in a file called `shell_state.ss`, in the user's
+home directory. It is small, typically a few kb or less, depending on the number of bookmarks stored.
