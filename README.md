@@ -1,10 +1,12 @@
-# Shell (Placeholder; WIP)
+# Shell
+Making the terminal application I want to use.
 
 [![Docs](https://docs.rs/dynamics/badge.svg)](https://www.athanorlab.com/docs)
 
 A simple shell; automates the problems I have trouble with in normal shells. Good autocomplete. Good
 knowledge of what folders are commonly used. Less typing for my workflows. Automate the boring
-parts of terminals.
+parts of terminals. Compatible with Windows, Linux, and Mac. Windows users probably need to have
+Powershell 7 or higher installed.
 
 ## Example use
 
@@ -33,12 +35,15 @@ sync "A commit message"
 
 
 ### Typed commands
+- "exit" or "quit": Exit the program.
+- "sync": Run `git add .`, `git commit -am <the commit message>`, and `git push`.
+- "del bm <number>": Delete a bookmark by number. 
 
+
+# Key commands
 - Enter key: Send input
 - Arrow keys:
 - Tab key: while using with cd, autocompletes, including to bookmarks.
-
-# Key commands
 - Ctrl + B: Bookmark the current directory.
 - Alt + B: List all bookmarks.
 - Ctrl + D: Exit

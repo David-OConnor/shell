@@ -33,11 +33,14 @@ pub fn save_bookmarks(bookmarks: &[PathBuf], path: &Path) -> io::Result<()> {
             fs::create_dir_all(parent)?;
         }
     }
+
     let mut f = fs::File::create(path)?;
     writeln!(f, "# Shell state — auto-generated. Do not edit while shell is running.")?;
+
     for bm in bookmarks {
         writeln!(f, "{BOOKMARK_TAG}{}", bm.display())?;
     }
+
     Ok(())
 }
 
@@ -49,7 +52,9 @@ pub fn load_bookmarks(path: &Path) -> io::Result<Vec<PathBuf>> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
+
     let mut out = Vec::new();
+
     for line in BufReader::new(file).lines() {
         let line = line?;
         let trimmed = line.trim();
@@ -59,7 +64,7 @@ pub fn load_bookmarks(path: &Path) -> io::Result<Vec<PathBuf>> {
         if let Some(rest) = trimmed.strip_prefix(BOOKMARK_TAG) {
             out.push(PathBuf::from(rest));
         }
-        // Unknown tags are ignored on purpose — forward compatibility.
+        // Unknown tags are ignored on purpose for forward compatibility.
     }
     Ok(out)
 }

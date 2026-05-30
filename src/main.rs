@@ -11,7 +11,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use rustyline::{
     Cmd, CompletionType, ConditionalEventHandler, Config, Context, Editor, Event, EventContext,
-    EventHandler, Helper, KeyEvent, Modifiers, RepeatCount,
+    EventHandler, ExternalPrinter, Helper, KeyEvent, Modifiers, RepeatCount,
     completion::{Completer, FilenameCompleter, Pair},
     error::ReadlineError,
     highlight::Highlighter,
@@ -20,11 +20,19 @@ use rustyline::{
     validate::Validator,
 };
 
+/// Shared handle to rustyline's `ExternalPrinter`. Key handlers use this to
+/// print messages *above* the in-progress prompt line — going through
+/// rustyline so it knows to clear the prompt, write the message, and redraw
+/// the prompt below. A raw `println!` from a handler corrupts the display
+/// because rustyline's cursor-tracking state never sees the write.
+type SharedPrinter = Arc<Mutex<Box<dyn ExternalPrinter + Send>>>;
+
 // ANSI escape codes. Modern Windows consoles (Windows Terminal, pwsh, post-2019
 // conhost) handle these natively; rustyline enables VT processing on startup.
 const COLOR_RESET: &str = "\x1b[0m";
-const COLOR_YELLOW: &str = "\x1b[93m"; // bright yellow for prompt accents
-const COLOR_BLUE: &str = "\x1b[94m"; // bright blue for user input
+const COLOR_YELLOW: &str = "\x1b[93m";
+const COLOR_BLUE: &str = "\x1b[94m";
+const COLOR_CYAN: &str = "\x1b[96m";
 
 struct HistoryItem {
     pub text: String,
@@ -92,21 +100,25 @@ struct ShellHelper {
     fs_completer: FilenameCompleter,
 }
 
-impl ShellHelper {
-    /// Render a bookmark path as `~/relative` when it lives under the home
-    /// directory; otherwise use the absolute form. Uses forward slashes after
-    /// the tilde for consistency with the rest of the shell.
-    fn render(&self, p: &Path) -> String {
-        if let Some(home) = &self.home {
-            if let Ok(rest) = p.strip_prefix(home) {
-                let rest_str = rest.to_string_lossy().replace('\\', "/");
-                if rest_str.is_empty() {
-                    return "~".to_string();
-                }
-                return format!("~/{}", rest_str);
+/// Render a path as `~/relative` when it lives under the home directory;
+/// otherwise use the absolute form. Uses forward slashes after the tilde for
+/// consistency with the rest of the shell.
+fn render_with_tilde(p: &Path, home: Option<&Path>) -> String {
+    if let Some(home) = home {
+        if let Ok(rest) = p.strip_prefix(home) {
+            let rest_str = rest.to_string_lossy().replace('\\', "/");
+            if rest_str.is_empty() {
+                return "~".to_string();
             }
+            return format!("~/{}", rest_str);
         }
-        p.display().to_string()
+    }
+    p.display().to_string()
+}
+
+impl ShellHelper {
+    fn render(&self, p: &Path) -> String {
+        render_with_tilde(p, self.home.as_deref())
     }
 }
 
@@ -192,7 +204,7 @@ impl Highlighter for ShellHelper {
         if line.is_empty() {
             Cow::Borrowed(line)
         } else {
-            Cow::Owned(format!("{COLOR_BLUE}{line}{COLOR_RESET}"))
+            Cow::Owned(format!("{COLOR_CYAN}{line}{COLOR_RESET}"))
         }
     }
 
@@ -213,6 +225,7 @@ impl Helper for ShellHelper {}
 struct BookmarkHandler {
     bookmarks: Arc<Mutex<Vec<PathBuf>>>,
     save_path: PathBuf,
+    printer: SharedPrinter,
 }
 
 impl ConditionalEventHandler for BookmarkHandler {
@@ -225,14 +238,18 @@ impl ConditionalEventHandler for BookmarkHandler {
     ) -> Option<Cmd> {
         if let Ok(cwd) = env::current_dir() {
             if let Ok(mut list) = self.bookmarks.lock() {
-                if list.contains(&cwd) {
-                    println!("This bookmark already exists");
+                let msg = if list.contains(&cwd) {
+                    "This bookmark already exists\n".to_string()
                 } else {
-                    println!("Added a bookmark: {}", cwd.display());
+                    let msg = format!("Added a bookmark: {}\n", cwd.display());
                     list.push(cwd);
                     if let Err(e) = save_data::save_bookmarks(&list, &self.save_path) {
                         eprintln!("warning: failed to save bookmarks: {e}");
                     }
+                    msg
+                };
+                if let Ok(mut p) = self.printer.lock() {
+                    let _ = p.print(msg);
                 }
             }
         }
@@ -246,6 +263,8 @@ impl ConditionalEventHandler for BookmarkHandler {
 /// Rustyline key handler for Ctrl+Shift+B: prints the current bookmark list.
 struct ListBookmarksHandler {
     bookmarks: Arc<Mutex<Vec<PathBuf>>>,
+    home: Option<PathBuf>,
+    printer: SharedPrinter,
 }
 
 impl ConditionalEventHandler for ListBookmarksHandler {
@@ -257,22 +276,35 @@ impl ConditionalEventHandler for ListBookmarksHandler {
         _ctx: &EventContext<'_>,
     ) -> Option<Cmd> {
         if let Ok(list) = self.bookmarks.lock() {
-            println!();
+            const DIVIDER: &str = "----------";
+
+            let mut msg = String::from("\nBookmarks. Use `del bm <number>` to delete; e.g. `del bm 4`:\n");
+            msg.push_str(DIVIDER);
+            msg.push('\n');
+
             if list.is_empty() {
-                println!("(no bookmarks)");
+                msg.push_str("(no bookmarks)\n");
             } else {
-                for bm in list.iter() {
-                    println!("- {}", bm.display());
+                // We may use these displayed indexes so users can delete bookmarks etc.
+                for (i, bm) in list.iter().enumerate() {
+                    msg.push_str(&format!(
+                        "{i}:  {}\n",
+                        render_with_tilde(bm, self.home.as_deref())
+                    ));
                 }
             }
-            println!();
+            msg.push_str(DIVIDER);
+            msg.push_str("\n\n");
+            if let Ok(mut p) = self.printer.lock() {
+                let _ = p.print(msg);
+            }
         }
         Some(Cmd::Noop)
     }
 }
 
 /// Runs one command line. Returns false if the shell should exit.
-fn run_command(state: &mut State, input: &str) -> bool {
+fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
     let input = input.trim();
     if input.is_empty() {
         return true;
@@ -294,10 +326,12 @@ fn run_command(state: &mut State, input: &str) -> bool {
 
         "sync" => {
             let message = args.trim().trim_matches('"');
+
             if message.is_empty() {
                 eprintln!("sync: commit message required, e.g. sync \"my commit message\"");
             } else {
                 let steps: [&[&str]; 3] = [&["add", "."], &["commit", "-am", message], &["push"]];
+
                 for step in steps {
                     match Command::new("git").args(step).status() {
                         Ok(status) if !status.success() => {
@@ -311,6 +345,46 @@ fn run_command(state: &mut State, input: &str) -> bool {
                         _ => {}
                     }
                 }
+            }
+        }
+
+        "del" => {
+            // `del bm <number>`: delete a bookmark by its displayed index
+            // (the numbers shown by the Alt+B bookmark list).
+            let (sub, rest) = match args.find(char::is_whitespace) {
+                Some(i) => (&args[..i], args[i..].trim()),
+                None => (args, ""),
+            };
+            match sub {
+                "bm" => match rest.parse::<usize>() {
+                    Ok(idx) => {
+                        let mut removed = None;
+                        match state.dir_bookmarks.lock() {
+                            Ok(mut list) => {
+                                if idx < list.len() {
+                                    removed = Some(list.remove(idx));
+                                } else {
+                                    eprintln!(
+                                        "del bm: no bookmark at index {idx} (have {})",
+                                        list.len()
+                                    );
+                                }
+                            }
+                            Err(_) => eprintln!("del bm: bookmark list lock poisoned"),
+                        }
+                        if let Some(path) = removed {
+                            println!("Deleted bookmark: {}", path.display());
+                            if let Err(e) = state.save(state_path) {
+                                eprintln!("del bm: failed to save bookmarks: {e}");
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        eprintln!("del bm: expected a number, e.g. `del bm 4`");
+                    }
+                },
+                "" => eprintln!("del: usage: del bm <number>"),
+                other => eprintln!("del: unknown target `{other}` (expected `bm`)"),
             }
         }
 
@@ -363,10 +437,11 @@ fn run_command(state: &mut State, input: &str) -> bool {
             }
         }
 
-        // Everything else: passthrough to the system shell.
+        // Everything else: Pass through to the system shell (e.g. the one which we launched this
+        // application from)
         _ => {
             let result = if cfg!(windows) {
-                // Powershell 7+
+                // Powershell 7+; we will assume Windows users have this.
                 Command::new("pwsh").args(["/C", input]).status()
             } else {
                 Command::new("sh").args(["-c", input]).status()
@@ -405,13 +480,24 @@ fn main() {
             return;
         }
     };
+    let home: Option<PathBuf> = env::var_os("USERPROFILE")
+        .or_else(|| env::var_os("HOME"))
+        .map(PathBuf::from);
     rl.set_helper(Some(ShellHelper {
         bookmarks: state.dir_bookmarks.clone(),
-        home: env::var_os("USERPROFILE")
-            .or_else(|| env::var_os("HOME"))
-            .map(PathBuf::from),
+        home: home.clone(),
         fs_completer: FilenameCompleter::new(),
     }));
+
+    // Shared printer so key handlers can write messages above the in-progress
+    // prompt without corrupting rustyline's display state.
+    let printer: SharedPrinter = match rl.create_external_printer() {
+        Ok(p) => Arc::new(Mutex::new(Box::new(p))),
+        Err(e) => {
+            eprintln!("Failed to create external printer: {e}");
+            return;
+        }
+    };
 
     // Ctrl+B:  push the CWD onto state.dir_bookmarks (and persist to disk).
     rl.bind_sequence(
@@ -419,16 +505,17 @@ fn main() {
         EventHandler::Conditional(Box::new(BookmarkHandler {
             bookmarks: state.dir_bookmarks.clone(),
             save_path: state_path.clone(),
+            printer: printer.clone(),
         })),
     );
 
-    // Alt+B:  print the current bookmark list. (We avoid Ctrl+Shift+B because
-    // on Windows it is often indistinguishable from plain Ctrl+B and would
-    // shadow the bookmark-add handler above.)
+    // Alt+B: Display the current bookmark list.
     rl.bind_sequence(
         KeyEvent::new('b', Modifiers::ALT),
         EventHandler::Conditional(Box::new(ListBookmarksHandler {
             bookmarks: state.dir_bookmarks.clone(),
+            home: home.clone(),
+            printer: printer.clone(),
         })),
     );
 
@@ -438,7 +525,7 @@ fn main() {
                 if !line.trim().is_empty() {
                     let _ = rl.add_history_entry(&line);
                 }
-                if !run_command(&mut state, &line) {
+                if !run_command(&mut state, &state_path, &line) {
                     break;
                 }
             }
