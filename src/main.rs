@@ -21,6 +21,7 @@ use rustyline::{
     history::FileHistory,
     validate::Validator,
 };
+use rustyline::history::History;
 
 /// Shared handle to rustyline's `ExternalPrinter`. Key handlers use this to
 /// print messages *above* the in-progress prompt line — going through
@@ -40,6 +41,11 @@ const COLOR_TEAL: &str = "\x1b[96m"; // program command (e.g. `git`)
 const COLOR_MAGENTA: &str = "\x1b[95m"; // subcommand (e.g. `commit`)
 const COLOR_GREEN: &str = "\x1b[92m"; // parameters / flags (e.g. `-am`)
 const COLOR_ORANGE: &str = "\x1b[38;5;208m"; // quote characters `'` and `"`
+
+// Display this many history items at a time.
+const DISP_HIST_LEN: usize = 20;
+
+const DIVIDER: &str = "----------";
 
 struct HistoryItem {
     pub text: String,
@@ -375,7 +381,7 @@ impl ConditionalEventHandler for BookmarkHandler {
     }
 }
 
-/// Rustyline key handler for Ctrl+Shift+B: prints the current bookmark list.
+/// Rustyline key handler: prints the current bookmark list.
 struct ListBookmarksHandler {
     bookmarks: Arc<Mutex<Vec<PathBuf>>>,
     home: Option<PathBuf>,
@@ -391,8 +397,6 @@ impl ConditionalEventHandler for ListBookmarksHandler {
         _ctx: &EventContext<'_>,
     ) -> Option<Cmd> {
         if let Ok(list) = self.bookmarks.lock() {
-            const DIVIDER: &str = "----------";
-
             let mut msg = String::from("\nBookmarks. Use `del bm <number>` to delete; e.g. `del bm 4`:\n");
             msg.push_str(DIVIDER);
             msg.push('\n');
@@ -405,6 +409,47 @@ impl ConditionalEventHandler for ListBookmarksHandler {
                     msg.push_str(&format!(
                         "{i}:  {}\n",
                         render_with_tilde(bm, self.home.as_deref())
+                    ));
+                }
+            }
+            msg.push_str(DIVIDER);
+            msg.push_str("\n\n");
+            if let Ok(mut p) = self.printer.lock() {
+                let _ = p.print(msg);
+            }
+        }
+        Some(Cmd::Noop)
+    }
+}
+
+/// Rustyline key handler: prints the current bookmark list.
+struct ListHistoryHandler {
+    history: Arc<Mutex<Vec<HistoryItem>>>,
+    home: Option<PathBuf>,
+    printer: SharedPrinter,
+}
+
+impl ConditionalEventHandler for ListHistoryHandler {
+    fn handle(
+        &self,
+        _evt: &Event,
+        _n: RepeatCount,
+        _positive: bool,
+        _ctx: &EventContext<'_>,
+    ) -> Option<Cmd> {
+        if let Ok(list) = self.history.lock() {
+            let mut msg = String::from("\nHistory. Use `his <number>` to run; e.g. `his 4`:\n");
+            msg.push_str(DIVIDER);
+            msg.push('\n');
+
+            if list.is_empty() {
+                msg.push_str("(no history)\n");
+            } else {
+                // We may use these displayed indexes so users can delete bookmarks etc.
+                for (i, item) in list.iter().enumerate() {
+                    msg.push_str(&format!(
+                        "{i}:  {}\n",
+                        item.text
                     ));
                 }
             }
@@ -520,6 +565,10 @@ fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
             }
         }
 
+        "his" | "hist" => {
+            // todo
+        }
+
         // Everything else: Pass through to the system shell (e.g. the one which we launched this
         // application from)
         _ => {
@@ -588,7 +637,7 @@ fn main() {
         }
     };
 
-    // Ctrl+B:  push the CWD onto state.dir_bookmarks (and persist to disk).
+    // Ctrl + B:  push the CWD onto state.dir_bookmarks (and persist to disk).
     rl.bind_sequence(
         KeyEvent::new('b', Modifiers::CTRL),
         EventHandler::Conditional(Box::new(BookmarkHandler {
@@ -604,6 +653,15 @@ fn main() {
         EventHandler::Conditional(Box::new(ListBookmarksHandler {
             bookmarks: state.dir_bookmarks.clone(),
             home: home.clone(),
+            printer: printer.clone(),
+        })),
+    );
+
+    // Ctrl + H: Display recent history
+    rl.bind_sequence(
+        KeyEvent::new('h', Modifiers::CTRL),
+        EventHandler::Conditional(Box::new(ListHistoryHandler {
+            history: state.history.clone()[0..DISP_HIST_LEN],
             printer: printer.clone(),
         })),
     );

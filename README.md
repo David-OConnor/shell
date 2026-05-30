@@ -52,6 +52,7 @@ Warning: This isn't suitable for all workflows. If you use git in a way where it
 - `exit` or `quit`: Exit the program.
 - `sync`: Run `git add .`, `git commit -am <the commit message>`, and `git push`.
 - "del bm <number>": Delete a bookmark by number. 
+- "his <number>": Execute a command from history.
 - "cat": Displays the contents of a (generally text) file. Similar to the standard Linux operation, but
 also works on Windows.
 
@@ -60,6 +61,7 @@ also works on Windows.
 - Arrow keys:
 - Tab key: while using with cd, autocompletes, including to bookmarks.
 - Ctrl + B: Bookmark the current directory.
+- Ctrl + H: List the most recent items from history.
 - Alt + B: List all bookmarks.
 - Ctrl + D: Exit
 - Ctrl + C: Exit
