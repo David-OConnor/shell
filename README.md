@@ -8,6 +8,14 @@ knowledge of what folders are commonly used. Less typing for my workflows. Autom
 parts of terminals. Compatible with Windows, Linux, and Mac. Windows users probably need to have
 Powershell 7 or higher installed.
 
+Highlights:
+
+- Syntax highlighting
+- Directory bookmarks
+- Intuitive autocomplete
+- Shortcuts for common workflows, e.g. with git.
+
+
 ## Example use
 
 ### Using directory bookmarks

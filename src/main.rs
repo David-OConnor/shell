@@ -35,6 +35,11 @@ const COLOR_RESET: &str = "\x1b[0m";
 const COLOR_YELLOW: &str = "\x1b[93m";
 const COLOR_BLUE: &str = "\x1b[94m";
 const COLOR_CYAN: &str = "\x1b[96m";
+// Input syntax-highlighting palette.
+const COLOR_TEAL: &str = "\x1b[96m"; // program command (e.g. `git`)
+const COLOR_MAGENTA: &str = "\x1b[95m"; // subcommand (e.g. `commit`)
+const COLOR_GREEN: &str = "\x1b[92m"; // parameters / flags (e.g. `-am`)
+const COLOR_ORANGE: &str = "\x1b[38;5;208m"; // quote characters `'` and `"`
 
 struct HistoryItem {
     pub text: String,
@@ -193,6 +198,100 @@ impl Hinter for ShellHelper {
     type Hint = String;
 }
 
+/// Split a line into word ranges (byte start, byte end), treating quoted
+/// regions as part of the surrounding word so that spaces inside `"..."` or
+/// `'...'` don't break a token apart.
+fn tokenize_words(line: &str) -> Vec<(usize, usize)> {
+    let mut words = Vec::new();
+    let mut quote: Option<char> = None;
+    let mut word_start: Option<usize> = None;
+
+    for (idx, ch) in line.char_indices() {
+        match quote {
+            Some(q) => {
+                if ch == q {
+                    quote = None;
+                }
+                if word_start.is_none() {
+                    word_start = Some(idx);
+                }
+            }
+            None => {
+                if ch == '"' || ch == '\'' {
+                    quote = Some(ch);
+                    if word_start.is_none() {
+                        word_start = Some(idx);
+                    }
+                } else if ch.is_whitespace() {
+                    if let Some(s) = word_start.take() {
+                        words.push((s, idx));
+                    }
+                } else if word_start.is_none() {
+                    word_start = Some(idx);
+                }
+            }
+        }
+    }
+    if let Some(s) = word_start {
+        words.push((s, line.len()));
+    }
+    words
+}
+
+/// Render a single word in `color`, but recolor any quote characters (`'`/`"`)
+/// orange so they stand out, then return to `color` for the rest of the word.
+fn render_word(out: &mut String, text: &str, color: &str) {
+    out.push_str(color);
+    for ch in text.chars() {
+        if ch == '"' || ch == '\'' {
+            out.push_str(COLOR_RESET);
+            out.push_str(COLOR_ORANGE);
+            out.push(ch);
+            out.push_str(COLOR_RESET);
+            out.push_str(color);
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push_str(COLOR_RESET);
+}
+
+/// Syntax-highlight a command line:
+/// - the first word (the program command) is teal,
+/// - the first following non-flag word (the subcommand) is magenta,
+/// - words beginning with `-` (flags/parameters) are light green,
+/// - quote characters are orange,
+/// - everything else keeps the base input color.
+fn highlight_input(line: &str) -> String {
+    let words = tokenize_words(line);
+    let mut out = String::new();
+    let mut last = 0;
+    let mut subcommand_assigned = false;
+
+    for (i, &(start, end)) in words.iter().enumerate() {
+        // Emit any whitespace before this word uncolored.
+        out.push_str(&line[last..start]);
+
+        let text = &line[start..end];
+        let color = if i == 0 {
+            COLOR_TEAL
+        } else if text.starts_with('-') {
+            COLOR_GREEN
+        } else if !subcommand_assigned {
+            subcommand_assigned = true;
+            COLOR_MAGENTA
+        } else {
+            COLOR_CYAN
+        };
+
+        render_word(&mut out, text, color);
+        last = end;
+    }
+    // Trailing whitespace, if any.
+    out.push_str(&line[last..]);
+    out
+}
+
 impl Highlighter for ShellHelper {
     /// Color the `S` and `$` accents in the prompt yellow, leaving the
     /// directory in its default terminal color. Prompt shape from
@@ -214,12 +313,13 @@ impl Highlighter for ShellHelper {
         Cow::Borrowed(prompt)
     }
 
-    /// Render the user's in-progress input in light blue.
+    /// Syntax-highlight the user's in-progress input: teal command, magenta
+    /// subcommand, light-green flags/parameters, and orange quote characters.
     fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
         if line.is_empty() {
             Cow::Borrowed(line)
         } else {
-            Cow::Owned(format!("{COLOR_CYAN}{line}{COLOR_RESET}"))
+            Cow::Owned(highlight_input(line))
         }
     }
 
