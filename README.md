@@ -38,7 +38,8 @@ sync "A commit message"
 - "exit" or "quit": Exit the program.
 - "sync": Run `git add .`, `git commit -am <the commit message>`, and `git push`.
 - "del bm <number>": Delete a bookmark by number. 
-
+- "cat": Displays the contents of a (generally text) file. Similar to the standard Linux operation, but
+also works on Windows.
 
 # Key commands
 - Enter key: Send input

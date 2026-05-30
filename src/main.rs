@@ -1,4 +1,6 @@
 mod save_data;
+mod tasks;
+mod util;
 
 use std::{
     borrow::Cow,
@@ -40,6 +42,8 @@ struct HistoryItem {
 }
 
 struct State {
+    /// Cached.
+    pub home: Option<PathBuf>,
     pub history: Vec<HistoryItem>,
     /// This initializes to env::current_dir, but is then managed from within
     /// this program.
@@ -54,6 +58,7 @@ impl State {
     // todo: Change this to Default::default A/R, as there are no params.
     fn new() -> Self {
         Self {
+            home: util::get_home(),
             history: Vec::new(),
             cwd: env::current_dir().unwrap_or_default(),
             dir_bookmarks: Arc::new(Mutex::new(Vec::new())),
@@ -62,7 +67,14 @@ impl State {
 
     /// This defines what the general prompt looks like. Its adorning characters let the user know they're in this shell.
     fn prompt(&self) -> String {
-        format!("S {} $ ", self.cwd.display())
+        // Mark the directory with a leading `*` when it's bookmarked.
+        let bookmarked = self
+            .dir_bookmarks
+            .lock()
+            .map(|list| list.contains(&self.cwd))
+            .unwrap_or(false);
+        let star = if bookmarked { "*" } else { "" };
+        format!("S {star}{} $ ", self.cwd.display())
     }
 
     /// Persist user-controlled state (currently: the bookmark list) to the
@@ -80,7 +92,10 @@ impl State {
     /// `State::new()` values (not an error).
     pub fn load(path: &Path) -> io::Result<Self> {
         let bookmarks = save_data::load_bookmarks(path)?;
+
+
         Ok(Self {
+            home: util::get_home(),
             history: Vec::new(),
             cwd: env::current_dir().unwrap_or_default(),
             dir_bookmarks: Arc::new(Mutex::new(bookmarks)),
@@ -348,6 +363,13 @@ fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
             }
         }
 
+        // On linux, this is likely the same as the system `cat` command, but it works on Windows.
+        // Another approach may be to only apply this branch on Windows.
+        "cat" => {
+            let target = util::path_from_args(state, args);
+            tasks::cat(&target);
+        }
+
         "del" => {
             // `del bm <number>`: delete a bookmark by its displayed index
             // (the numbers shown by the Alt+B bookmark list).
@@ -355,6 +377,7 @@ fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
                 Some(i) => (&args[..i], args[i..].trim()),
                 None => (args, ""),
             };
+
             match sub {
                 "bm" => match rest.parse::<usize>() {
                     Ok(idx) => {
@@ -389,48 +412,8 @@ fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
         }
 
         "cd" => {
-            // Resolve the home directory once; used for bare `cd` and for
-            // expanding a leading `~` / `~/...` in the argument.
-            let home = || -> Option<PathBuf> {
-                env::var_os("USERPROFILE")
-                    .or_else(|| env::var_os("HOME"))
-                    .map(PathBuf::from)
-            };
+            let target = util::path_from_args(state, args);
 
-            let target = if args.is_empty() {
-                // cd with no args goes home
-                home().unwrap_or_else(|| state.cwd.clone())
-            } else if args == "~" {
-                home().unwrap_or_else(|| state.cwd.clone())
-            } else if let Some(rest) = args.strip_prefix("~/").or_else(|| args.strip_prefix("~\\"))
-            {
-                home()
-                    .map(|h| h.join(rest))
-                    .unwrap_or_else(|| state.cwd.join(args))
-            } else {
-                // Try the literal path first so real subdirs / absolute paths
-                // keep their normal meaning. If it isn't a directory, fall
-                // back to a prefix-match against bookmarked directories
-                // (matched against the bookmark's final path component,
-                // case-insensitive).
-                let literal = state.cwd.join(args);
-                if literal.is_dir() {
-                    literal
-                } else {
-                    let needle = args.to_lowercase();
-                    let bookmark_match = state.dir_bookmarks.lock().ok().and_then(|list| {
-                        list.iter()
-                            .find(|p| {
-                                p.file_name()
-                                    .and_then(|n| n.to_str())
-                                    .map(|n| n.to_lowercase().starts_with(&needle))
-                                    .unwrap_or(false)
-                            })
-                            .cloned()
-                    });
-                    bookmark_match.unwrap_or(literal)
-                }
-            };
             match env::set_current_dir(&target) {
                 Ok(_) => state.cwd = env::current_dir().unwrap_or(target),
                 Err(e) => eprintln!("cd: {e}"),
@@ -442,7 +425,13 @@ fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
         _ => {
             let result = if cfg!(windows) {
                 // Powershell 7+; we will assume Windows users have this.
-                Command::new("pwsh").args(["/C", input]).status()
+                // -NoProfile/-NoLogo skip loading the user's $PROFILE and the
+                // startup banner, which together dominate pwsh's cold-start
+                // time. Each command spawns a fresh process, so this shaves
+                // ~200ms off every passthrough command.
+                Command::new("pwsh")
+                    .args(["-NoProfile", "-NoLogo", "-Command", input])
+                    .status()
             } else {
                 Command::new("sh").args(["-c", input]).status()
             };
@@ -509,7 +498,7 @@ fn main() {
         })),
     );
 
-    // Alt+B: Display the current bookmark list.
+    // Alt + B: Display the current bookmark list.
     rl.bind_sequence(
         KeyEvent::new('b', Modifiers::ALT),
         EventHandler::Conditional(Box::new(ListBookmarksHandler {
