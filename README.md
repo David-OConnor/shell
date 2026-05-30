@@ -22,9 +22,13 @@ Type `cd`, then a few characters from the folder name, then press tab to complet
 ### Autocomplete 
 
 ### Git assistance
+Run `sync` followed by a commit message in quote. This runs the following:
+  - `git add .`
+  - `git commit -am <the commit message>`
+  - `git push`
 
 ```shell
-git sync "A commit message"
+sync "A commit message"
 ```
 
 
