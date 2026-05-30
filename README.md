@@ -32,19 +32,25 @@ Type `cd`, then a few characters from the folder name, then press tab to complet
 ### Autocomplete 
 
 ### Git assistance
-Run `sync` followed by a commit message in quote. This runs the following:
+Run `sync` followed by a commit message in quote. Quotes are optional. This runs the following:
   - `git add .`
   - `git commit -am <the commit message>`
   - `git push`
 
 ```shell
 sync "A commit message"
+
+// Or:
+
+sync A commit message
 ```
+
+Warning: This isn't suitable for all workflows. If you use git in a way where it isn't appropriate to sync all gitignored files, this may have unintended consequences!
 
 
 ### Typed commands
-- "exit" or "quit": Exit the program.
-- "sync": Run `git add .`, `git commit -am <the commit message>`, and `git push`.
+- `exit` or `quit`: Exit the program.
+- `sync`: Run `git add .`, `git commit -am <the commit message>`, and `git push`.
 - "del bm <number>": Delete a bookmark by number. 
 - "cat": Displays the contents of a (generally text) file. Similar to the standard Linux operation, but
 also works on Windows.
