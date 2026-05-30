@@ -13,7 +13,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use rustyline::{
     Cmd, CompletionType, ConditionalEventHandler, Config, Context, Editor, Event, EventContext,
-    EventHandler, ExternalPrinter, Helper, KeyEvent, Modifiers, RepeatCount,
+    EventHandler, ExternalPrinter, Helper, KeyCode, KeyEvent, Modifiers, RepeatCount,
     completion::{Completer, FilenameCompleter, Pair},
     error::ReadlineError,
     highlight::Highlighter,
@@ -21,7 +21,6 @@ use rustyline::{
     history::FileHistory,
     validate::Validator,
 };
-use rustyline::history::History;
 
 /// Shared handle to rustyline's `ExternalPrinter`. Key handlers use this to
 /// print messages *above* the in-progress prompt line — going through
@@ -52,10 +51,19 @@ struct HistoryItem {
     pub dt: DateTime<Utc>,
 }
 
+struct RecentDir {
+    pub path: PathBuf,
+    pub dt: DateTime<Utc>,
+}
+
+// todo: Instead of storing these Arc<Mutex>>s, perhaps we do it some other way; this is due
+// todo: due to how Rustyline expects it.
 struct State {
     /// Cached.
     pub home: Option<PathBuf>,
-    pub history: Vec<HistoryItem>,
+    /// Shared with the Ctrl+H / arrow-key handlers, which render pages of
+    /// recent commands without holding `State`.
+    pub history: Arc<Mutex<Vec<HistoryItem>>>,
     /// This initializes to env::current_dir, but is then managed from within
     /// this program.
     pub cwd: PathBuf,
@@ -63,6 +71,8 @@ struct State {
     /// navigated to. Shared with the readline key handler (Ctrl+B), which
     /// is why it lives behind an Arc<Mutex<_>>.
     pub dir_bookmarks: Arc<Mutex<Vec<PathBuf>>>,
+    /// Paths we've execute commands from. Works in a similar way to bookmarks.
+    pub recent_dirs: Arc<Mutex<Vec<RecentDir>>>,
 }
 
 impl State {
@@ -70,9 +80,10 @@ impl State {
     fn new() -> Self {
         Self {
             home: util::get_home(),
-            history: Vec::new(),
+            history: Arc::new(Mutex::new(Vec::new())),
             cwd: env::current_dir().unwrap_or_default(),
             dir_bookmarks: Arc::new(Mutex::new(Vec::new())),
+            recent_dirs: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -88,28 +99,34 @@ impl State {
         format!("S {star}{} $ ", self.cwd.display())
     }
 
-    /// Persist user-controlled state (currently: the bookmark list) to the
-    /// given file. Called after every bookmark mutation.
+    /// Persist user-controlled state (bookmarks + recent dirs) to the given
+    /// file. Called after every mutation of either list. Locks bookmarks
+    /// before recent_dirs — keep this order consistent across all callers
+    /// to avoid lock-order deadlocks.
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        let list = self
+        let bookmarks = self
             .dir_bookmarks
             .lock()
             .map_err(|_| io::Error::new(io::ErrorKind::Other, "bookmark lock poisoned"))?;
-        save_data::save_bookmarks(&list, path)
+        let recent = self
+            .recent_dirs
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "recent-dirs lock poisoned"))?;
+        save_data::save_state(&bookmarks, &recent, path)
     }
 
     /// Restore state from disk, returning a fresh `State` with that data.
     /// A missing file is treated as "no saved state" and yields the default
     /// `State::new()` values (not an error).
     pub fn load(path: &Path) -> io::Result<Self> {
-        let bookmarks = save_data::load_bookmarks(path)?;
-
+        let (bookmarks, recent_dirs) = save_data::load_state(path)?;
 
         Ok(Self {
             home: util::get_home(),
-            history: Vec::new(),
+            history: Arc::new(Mutex::new(Vec::new())),
             cwd: env::current_dir().unwrap_or_default(),
             dir_bookmarks: Arc::new(Mutex::new(bookmarks)),
+            recent_dirs: Arc::new(Mutex::new(recent_dirs)),
         })
     }
 }
@@ -345,6 +362,9 @@ impl Helper for ShellHelper {}
 /// the list to disk on every successful add.
 struct BookmarkHandler {
     bookmarks: Arc<Mutex<Vec<PathBuf>>>,
+    /// Held so we can write the full state file (bookmarks + recent dirs)
+    /// in a single pass when a bookmark is added.
+    recent_dirs: Arc<Mutex<Vec<RecentDir>>>,
     save_path: PathBuf,
     printer: SharedPrinter,
 }
@@ -364,8 +384,12 @@ impl ConditionalEventHandler for BookmarkHandler {
                 } else {
                     let msg = format!("Added a bookmark: {}\n", cwd.display());
                     list.push(cwd);
-                    if let Err(e) = save_data::save_bookmarks(&list, &self.save_path) {
-                        eprintln!("warning: failed to save bookmarks: {e}");
+                    // Lock recent_dirs after bookmarks — same order as
+                    // State::save, so no lock-order conflicts.
+                    if let Ok(recent) = self.recent_dirs.lock() {
+                        if let Err(e) = save_data::save_state(&list, &recent, &self.save_path) {
+                            eprintln!("warning: failed to save state: {e}");
+                        }
                     }
                     msg
                 };
@@ -397,7 +421,8 @@ impl ConditionalEventHandler for ListBookmarksHandler {
         _ctx: &EventContext<'_>,
     ) -> Option<Cmd> {
         if let Ok(list) = self.bookmarks.lock() {
-            let mut msg = String::from("\nBookmarks. Use `del bm <number>` to delete; e.g. `del bm 4`:\n");
+            let mut msg =
+                String::from("\nBookmarks. Use `del bm <number>` to delete; e.g. `del bm 4`:\n");
             msg.push_str(DIVIDER);
             msg.push('\n');
 
@@ -422,14 +447,17 @@ impl ConditionalEventHandler for ListBookmarksHandler {
     }
 }
 
-/// Rustyline key handler: prints the current bookmark list.
-struct ListHistoryHandler {
-    history: Arc<Mutex<Vec<HistoryItem>>>,
+/// Rustyline key handler: prints the recent-directories list (Ctrl+R).
+struct ListRecentDirsHandler {
+    recent_dirs: Arc<Mutex<Vec<RecentDir>>>,
+    /// Consulted so bookmarked recent dirs get a leading `*`, matching the
+    /// prompt convention.
+    bookmarks: Arc<Mutex<Vec<PathBuf>>>,
     home: Option<PathBuf>,
     printer: SharedPrinter,
 }
 
-impl ConditionalEventHandler for ListHistoryHandler {
+impl ConditionalEventHandler for ListRecentDirsHandler {
     fn handle(
         &self,
         _evt: &Event,
@@ -437,19 +465,26 @@ impl ConditionalEventHandler for ListHistoryHandler {
         _positive: bool,
         _ctx: &EventContext<'_>,
     ) -> Option<Cmd> {
-        if let Ok(list) = self.history.lock() {
-            let mut msg = String::from("\nHistory. Use `his <number>` to run; e.g. `his 4`:\n");
+        if let Ok(list) = self.recent_dirs.lock() {
+            // Snapshot the bookmark set so we can mark each row without
+            // re-locking inside the render loop.
+            let bookmarks: Vec<PathBuf> =
+                self.bookmarks.lock().map(|b| b.clone()).unwrap_or_default();
+
+            let mut msg =
+                String::from("\nRecent directories. Use `cd <number>` to go; e.g. `cd 4`:\n");
             msg.push_str(DIVIDER);
             msg.push('\n');
 
             if list.is_empty() {
-                msg.push_str("(no history)\n");
+                msg.push_str("(no recent directories)\n");
             } else {
-                // We may use these displayed indexes so users can delete bookmarks etc.
-                for (i, item) in list.iter().enumerate() {
+                // Vec is maintained oldest-first; newest sits at the bottom.
+                for (i, r) in list.iter().enumerate() {
+                    let star = if bookmarks.contains(&r.path) { "*" } else { "" };
                     msg.push_str(&format!(
-                        "{i}:  {}\n",
-                        item.text
+                        "{i}:  {star}{}\n",
+                        render_with_tilde(&r.path, self.home.as_deref())
                     ));
                 }
             }
@@ -463,6 +498,168 @@ impl ConditionalEventHandler for ListHistoryHandler {
     }
 }
 
+/// Tracks the user's position when paging through history with the arrow
+/// keys. Set by Ctrl+H; while `active`, Left/Right paginate when the input
+/// line is empty.
+struct HistoryNavState {
+    active: bool,
+    /// 0 = most recent page (newest items, shown at the bottom).
+    page: usize,
+}
+
+impl HistoryNavState {
+    fn new() -> Self {
+        Self {
+            active: false,
+            page: 0,
+        }
+    }
+}
+
+/// Total pages needed to show `total` items at `per_page` items per page.
+/// Returns 1 when empty so the renderer can still show a "Page 1/1" frame.
+fn page_count(total: usize, per_page: usize) -> usize {
+    if total == 0 {
+        1
+    } else {
+        total.div_ceil(per_page)
+    }
+}
+
+/// Render one page of history. Page 0 = most recent items, with the newest
+/// at the bottom. Items are labelled with their absolute index into the
+/// history vec so the user can type `his <index>` to re-run them.
+fn render_history_page(history: &[HistoryItem], page: usize) -> String {
+    let total = history.len();
+    let pages = page_count(total, DISP_HIST_LEN);
+    let page = page.min(pages - 1);
+
+    let mut msg = String::from(
+        "\nHistory  (← older page  → newer page).  Use `his <number>` to run; e.g. `his 4`",
+    );
+    msg.push_str(&format!(".  Page {}/{}:\n", page + 1, pages));
+    msg.push_str(DIVIDER);
+    msg.push('\n');
+
+    if total == 0 {
+        msg.push_str("(no history)\n");
+    } else {
+        // page 0 covers the last DISP_HIST_LEN items; page 1 the previous
+        // DISP_HIST_LEN before that; etc. Newest sits at the bottom.
+        let end = total - page * DISP_HIST_LEN;
+        let start = end.saturating_sub(DISP_HIST_LEN);
+        for i in start..end {
+            msg.push_str(&format!("{i}:  {}\n", history[i].text));
+        }
+    }
+    msg.push_str(DIVIDER);
+    msg.push_str("\n\n");
+    msg
+}
+
+/// Rustyline key handler: prints a page of the command history. Ctrl+H
+/// always resets to the most recent page and re-enables arrow-key paging.
+struct ListHistoryHandler {
+    history: Arc<Mutex<Vec<HistoryItem>>>,
+    nav: Arc<Mutex<HistoryNavState>>,
+    printer: SharedPrinter,
+}
+
+impl ConditionalEventHandler for ListHistoryHandler {
+    fn handle(
+        &self,
+        _evt: &Event,
+        _n: RepeatCount,
+        _positive: bool,
+        _ctx: &EventContext<'_>,
+    ) -> Option<Cmd> {
+        let msg = if let Ok(mut nav) = self.nav.lock() {
+            nav.active = true;
+            nav.page = 0;
+            self.history
+                .lock()
+                .ok()
+                .map(|h| render_history_page(&h, nav.page))
+        } else {
+            None
+        };
+        if let Some(msg) = msg {
+            if let Ok(mut p) = self.printer.lock() {
+                let _ = p.print(msg);
+            }
+        }
+        Some(Cmd::Noop)
+    }
+}
+
+/// Rustyline key handler bound to Left/Right when history paging is active.
+/// `delta == +1` moves to an older page; `delta == -1` moves to a newer one.
+/// Only steals the keystroke when paging is active *and* the input line is
+/// empty — otherwise it returns `None` so rustyline does its usual cursor
+/// movement.
+struct HistoryPageHandler {
+    history: Arc<Mutex<Vec<HistoryItem>>>,
+    nav: Arc<Mutex<HistoryNavState>>,
+    printer: SharedPrinter,
+    delta: i32,
+}
+
+impl ConditionalEventHandler for HistoryPageHandler {
+    fn handle(
+        &self,
+        _evt: &Event,
+        _n: RepeatCount,
+        _positive: bool,
+        ctx: &EventContext<'_>,
+    ) -> Option<Cmd> {
+        if !ctx.line().is_empty() {
+            return None;
+        }
+
+        let (active, _) = match self.nav.lock() {
+            Ok(n) => (n.active, n.page),
+            Err(_) => return None,
+        };
+        if !active {
+            return None;
+        }
+
+        let msg = {
+            let hist = self.history.lock().ok()?;
+            let mut nav = self.nav.lock().ok()?;
+            let pages = page_count(hist.len(), DISP_HIST_LEN);
+            let new_page = if self.delta > 0 {
+                (nav.page + 1).min(pages - 1)
+            } else {
+                nav.page.saturating_sub(1)
+            };
+            if new_page == nav.page {
+                // Already at the edge — consume the key but skip the redraw.
+                return Some(Cmd::Noop);
+            }
+            nav.page = new_page;
+            render_history_page(&hist, nav.page)
+        };
+        if let Ok(mut p) = self.printer.lock() {
+            let _ = p.print(msg);
+        }
+        Some(Cmd::Noop)
+    }
+}
+
+/// Record `cwd` in the recent-dirs list. If the path is already present we
+/// remove the old entry and push a fresh one to the end, so the list stays
+/// deduped and the newest entry sits at the bottom of the display.
+fn record_recent_dir(recent: &Arc<Mutex<Vec<RecentDir>>>, cwd: &Path) {
+    if let Ok(mut list) = recent.lock() {
+        list.retain(|r| r.path != cwd);
+        list.push(RecentDir {
+            path: cwd.to_path_buf(),
+            dt: Utc::now(),
+        });
+    }
+}
+
 /// Runs one command line. Returns false if the shell should exit.
 fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
     let input = input.trim();
@@ -470,16 +667,52 @@ fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
         return true;
     }
 
-    state.history.push(HistoryItem {
-        text: input.to_string(),
-        dt: Utc::now(),
-    });
-
     // Split into command + remainder for built-in dispatch.
     let (cmd, args) = match input.find(char::is_whitespace) {
         Some(i) => (&input[..i], input[i..].trim()),
         None => (input, ""),
     };
+
+    // `his`/`hist <n>` re-runs a previous history item. Handle it before
+    // recording the meta-invocation so the user's history stays focused on
+    // the resolved command (which the recursive call below will record).
+    if cmd == "his" || cmd == "hist" {
+        match args.parse::<usize>() {
+            Ok(idx) => {
+                let resolved = state
+                    .history
+                    .lock()
+                    .ok()
+                    .and_then(|h| h.get(idx).map(|item| item.text.clone()));
+                match resolved {
+                    Some(text) => {
+                        println!("> {text}");
+                        return run_command(state, state_path, &text);
+                    }
+                    None => eprintln!("{cmd}: no history item at index {idx}"),
+                }
+            }
+            Err(_) => eprintln!("{cmd}: usage: {cmd} <number>"),
+        }
+        return true;
+    }
+
+    if let Ok(mut hist) = state.history.lock() {
+        hist.push(HistoryItem {
+            text: input.to_string(),
+            dt: Utc::now(),
+        });
+    }
+
+    // Track directories we've run real commands from (everything except `cd`),
+    // so Ctrl+R / `cd <number>` can jump back to them.
+    if cmd != "cd" {
+        let cwd = state.cwd.clone();
+        record_recent_dir(&state.recent_dirs, &cwd);
+        if let Err(e) = state.save(state_path) {
+            eprintln!("warning: failed to save recent dirs: {e}");
+        }
+    }
 
     match cmd {
         "exit" | "quit" => return false,
@@ -557,17 +790,54 @@ fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
         }
 
         "cd" => {
-            let target = util::path_from_args(state, args);
+            // `cd <number>` (with nothing else after) jumps to a recent
+            // directory by its Ctrl+R index. Anything else is resolved as a
+            // normal path/bookmark argument.
+            let target = if let Ok(idx) = args.parse::<usize>() {
+                let resolved = state
+                    .recent_dirs
+                    .lock()
+                    .ok()
+                    .and_then(|list| list.get(idx).map(|r| r.path.clone()));
+                match resolved {
+                    Some(p) => Some(p),
+                    None => {
+                        eprintln!("cd: no recent directory at index {idx}");
+                        None
+                    }
+                }
+            } else {
+                Some(util::path_from_args(state, args))
+            };
 
-            match env::set_current_dir(&target) {
-                Ok(_) => state.cwd = env::current_dir().unwrap_or(target),
-                Err(e) => eprintln!("cd: {e}"),
+            if let Some(target) = target {
+                match env::set_current_dir(&target) {
+                    Ok(_) => state.cwd = env::current_dir().unwrap_or(target),
+                    Err(e) => eprintln!("cd: {e}"),
+                }
             }
         }
 
-        "his" | "hist" => {
-            // todo
-        }
+        // `bm <number>`: jump to the bookmark at that Alt+B index. Mirrors
+        // `cd <number>` but indexes into the bookmark list instead of
+        // recent_dirs.
+        "bm" => match args.parse::<usize>() {
+            Ok(idx) => {
+                let resolved = state
+                    .dir_bookmarks
+                    .lock()
+                    .ok()
+                    .and_then(|list| list.get(idx).cloned());
+                match resolved {
+                    Some(target) => match env::set_current_dir(&target) {
+                        Ok(_) => state.cwd = env::current_dir().unwrap_or(target),
+                        Err(e) => eprintln!("bm: {e}"),
+                    },
+                    None => eprintln!("bm: no bookmark at index {idx}"),
+                }
+            }
+            Err(_) => eprintln!("bm: usage: bm <number>"),
+        },
 
         // Everything else: Pass through to the system shell (e.g. the one which we launched this
         // application from)
@@ -596,8 +866,8 @@ fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
 fn main() {
     // Resolve the persistent-state file path, then try to load. A missing
     // file is fine (first run); other I/O errors are reported but non-fatal.
-    let state_path = save_data::default_path()
-        .unwrap_or_else(|| PathBuf::from(save_data::FILENAME));
+    let state_path =
+        save_data::default_path().unwrap_or_else(|| PathBuf::from(save_data::FILENAME));
     let mut state = State::load(&state_path).unwrap_or_else(|e| {
         eprintln!("warning: failed to load saved state ({e}); starting fresh");
         State::new()
@@ -642,6 +912,7 @@ fn main() {
         KeyEvent::new('b', Modifiers::CTRL),
         EventHandler::Conditional(Box::new(BookmarkHandler {
             bookmarks: state.dir_bookmarks.clone(),
+            recent_dirs: state.recent_dirs.clone(),
             save_path: state_path.clone(),
             printer: printer.clone(),
         })),
@@ -657,12 +928,52 @@ fn main() {
         })),
     );
 
+    // Ctrl + R: Display the recent-directories list. Overrides rustyline's
+    // default reverse-i-search binding, which this shell doesn't use.
+    rl.bind_sequence(
+        KeyEvent::new('r', Modifiers::CTRL),
+        EventHandler::Conditional(Box::new(ListRecentDirsHandler {
+            recent_dirs: state.recent_dirs.clone(),
+            bookmarks: state.dir_bookmarks.clone(),
+            home: home.clone(),
+            printer: printer.clone(),
+        })),
+    );
+
+    // Shared paging state for the history viewer. Ctrl+H sets it active and
+    // resets to the most recent page; Left/Right adjust the page while it
+    // remains active and the input line is empty.
+    let history_nav = Arc::new(Mutex::new(HistoryNavState::new()));
+
     // Ctrl + H: Display recent history
     rl.bind_sequence(
         KeyEvent::new('h', Modifiers::CTRL),
         EventHandler::Conditional(Box::new(ListHistoryHandler {
-            history: state.history.clone()[0..DISP_HIST_LEN],
+            history: state.history.clone(),
+            nav: history_nav.clone(),
             printer: printer.clone(),
+        })),
+    );
+
+    // ← / → : page through history once Ctrl+H has been pressed. The handlers
+    // return `None` when the buffer is non-empty or paging isn't active, so
+    // normal cursor movement still works the rest of the time.
+    rl.bind_sequence(
+        KeyEvent(KeyCode::Left, Modifiers::NONE),
+        EventHandler::Conditional(Box::new(HistoryPageHandler {
+            history: state.history.clone(),
+            nav: history_nav.clone(),
+            printer: printer.clone(),
+            delta: 1,
+        })),
+    );
+    rl.bind_sequence(
+        KeyEvent(KeyCode::Right, Modifiers::NONE),
+        EventHandler::Conditional(Box::new(HistoryPageHandler {
+            history: state.history.clone(),
+            nav: history_nav.clone(),
+            printer: printer.clone(),
+            delta: -1,
         })),
     );
 

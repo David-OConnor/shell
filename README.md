@@ -51,23 +51,30 @@ Warning: This isn't suitable for all workflows. If you use git in a way where it
 ### Typed commands
 - `exit` or `quit`: Exit the program.
 - `sync`: Run `git add .`, `git commit -am <the commit message>`, and `git push`.
-- "del bm <number>": Delete a bookmark by number. 
-- "his <number>": Execute a command from history.
-- "cat": Displays the contents of a (generally text) file. Similar to the standard Linux operation, but
+- `del bm <number>`: Delete a bookmark by number. 
+- `his <number>`: Execute a command from history.
+- `cat`: Displays the contents of a (generally text) file. Similar to the standard Linux operation, but
 also works on Windows.
+- `cd <number>`: Go to this recent directory (As listed with Ctrl + R)
+- `bm <number>`: Go to this bookmark (As listed with Alt + B)
+- `cd <part-of-path>` + Tab key: Go to this directory history item
 
-# Key commands
+## Key commands
 - Enter key: Send input
 - Arrow keys:
 - Tab key: while using with cd, autocompletes, including to bookmarks.
+
+### Recent or frequent commands
+``
 - Ctrl + B: Bookmark the current directory.
+- Ctrl + R: List the most recent directories a command has been executed from.
 - Ctrl + H: List the most recent items from history.
+
 - Alt + B: List all bookmarks.
 - Ctrl + D: Exit
-- Ctrl + C: Exit
 
 
 
 ## Application state
 Application state, including folder bookmarks, is saved in a file called `shell_state.ss`, in the user's
-home directory. It is small, typically a few kb or less, depending on the number of bookmarks stored.
+home directory. It is small, typically a few tens of kb.

@@ -1,7 +1,7 @@
 //! Misc utility functionality.
 
-use std::env;
-use std::path::PathBuf;
+use std::{env, path::PathBuf};
+
 use crate::State;
 
 /// Resolve a `cd`/`cat`-style path argument against the shell's state:
@@ -14,8 +14,7 @@ pub fn path_from_args(state: &State, args: &str) -> PathBuf {
         // cd with no args (or a bare `~`) goes home; fall back to the
         // current directory if we couldn't resolve a home dir.
         state.home.clone().unwrap_or_else(|| state.cwd.clone())
-    } else if let Some(rest) = args.strip_prefix("~/").or_else(|| args.strip_prefix("~\\"))
-    {
+    } else if let Some(rest) = args.strip_prefix("~/").or_else(|| args.strip_prefix("~\\")) {
         state
             .home
             .as_ref()
@@ -50,7 +49,7 @@ pub fn path_from_args(state: &State, args: &str) -> PathBuf {
 pub fn get_home() -> Option<PathBuf> {
     // Resolve the home directory once; used for bare `cd` and for
     // expanding a leading `~` / `~/...` in the argument.
-        env::var_os("USERPROFILE")
-            .or_else(|| env::var_os("HOME"))
-            .map(PathBuf::from)
+    env::var_os("USERPROFILE")
+        .or_else(|| env::var_os("HOME"))
+        .map(PathBuf::from)
 }
