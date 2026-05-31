@@ -8,6 +8,12 @@ knowledge of what folders are commonly used. Less typing for my workflows. Autom
 parts of terminals. Compatible with Windows, Linux, and Mac. Windows users probably need to have
 Powershell 7 or higher installed.
 
+
+### Todo: Do we want to supplement or replace this program with a GUI version instead? 
+It woulds be a combination of file manager and CLI system; or a general-purpose way of executing OS-level etc
+CLI commands, but in 2 dimensions.
+
+
 Highlights:
 
 - Syntax highlighting

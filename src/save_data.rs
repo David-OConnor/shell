@@ -19,7 +19,13 @@ use std::{
 
 use chrono::{DateTime, Utc};
 
-use crate::RecentDir;
+/// One entry in the recent-directories list: a path we ran a command from,
+/// plus the time we last visited it. Lives in `save_data` so the persistence
+/// format owns its row type; both the CLI and GUI binaries re-use it.
+pub struct RecentDir {
+    pub path: PathBuf,
+    pub dt: DateTime<Utc>,
+}
 
 pub const FILENAME: &str = "shell_state.ss";
 

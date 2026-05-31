@@ -1,6 +1,4 @@
-mod save_data;
 mod tasks;
-mod util;
 
 use std::{
     borrow::Cow,
@@ -11,6 +9,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+use shell::{RecentDir, get_home, path_from_args, save_data};
 use rustyline::{
     Cmd, CompletionType, ConditionalEventHandler, Config, Context, Editor, Event, EventContext,
     EventHandler, ExternalPrinter, Helper, KeyCode, KeyEvent, Modifiers, RepeatCount,
@@ -51,11 +50,6 @@ struct HistoryItem {
     pub dt: DateTime<Utc>,
 }
 
-struct RecentDir {
-    pub path: PathBuf,
-    pub dt: DateTime<Utc>,
-}
-
 // todo: Instead of storing these Arc<Mutex>>s, perhaps we do it some other way; this is due
 // todo: due to how Rustyline expects it.
 struct State {
@@ -75,18 +69,19 @@ struct State {
     pub recent_dirs: Arc<Mutex<Vec<RecentDir>>>,
 }
 
-impl State {
-    // todo: Change this to Default::default A/R, as there are no params.
-    fn new() -> Self {
+impl Default for State {
+    fn default() -> Self {
         Self {
-            home: util::get_home(),
+            home: get_home(),
             history: Arc::new(Mutex::new(Vec::new())),
             cwd: env::current_dir().unwrap_or_default(),
             dir_bookmarks: Arc::new(Mutex::new(Vec::new())),
             recent_dirs: Arc::new(Mutex::new(Vec::new())),
         }
     }
+}
 
+impl State {
     /// This defines what the general prompt looks like. Its adorning characters let the user know they're in this shell.
     fn prompt(&self) -> String {
         // Mark the directory with a leading `*` when it's bookmarked.
@@ -122,7 +117,7 @@ impl State {
         let (bookmarks, recent_dirs) = save_data::load_state(path)?;
 
         Ok(Self {
-            home: util::get_home(),
+            home: get_home(),
             history: Arc::new(Mutex::new(Vec::new())),
             cwd: env::current_dir().unwrap_or_default(),
             dir_bookmarks: Arc::new(Mutex::new(bookmarks)),
@@ -348,7 +343,7 @@ impl Highlighter for ShellHelper {
 
     /// Tell rustyline to re-run `highlight` on every keystroke so the color
     /// extends to newly-typed characters.
-    fn highlight_char(&self, _line: &str, _pos: usize, _forced: bool) -> bool {
+    fn highlight_char(&self, _line: &str, _pos: usize, _forced: rustyline::highlight::CmdKind) -> bool {
         true
     }
 }
@@ -761,7 +756,10 @@ fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
         // On linux, this is likely the same as the system `cat` command, but it works on Windows.
         // Another approach may be to only apply this branch on Windows.
         "cat" => {
-            let target = util::path_from_args(state, args);
+            let bookmarks = state.dir_bookmarks.lock();
+            let slice: &[PathBuf] = bookmarks.as_deref().map(|v| v.as_slice()).unwrap_or(&[]);
+            let target = path_from_args(state.home.as_deref(), &state.cwd, slice, args);
+            drop(bookmarks);
             tasks::cat(&target);
         }
 
@@ -824,7 +822,10 @@ fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
                     }
                 }
             } else {
-                Some(util::path_from_args(state, args))
+                let bookmarks = state.dir_bookmarks.lock();
+                let slice: &[PathBuf] =
+                    bookmarks.as_deref().map(|v| v.as_slice()).unwrap_or(&[]);
+                Some(path_from_args(state.home.as_deref(), &state.cwd, slice, args))
             };
 
             if let Some(target) = target {
@@ -887,7 +888,7 @@ fn main() {
         save_data::default_path().unwrap_or_else(|| PathBuf::from(save_data::FILENAME));
     let mut state = State::load(&state_path).unwrap_or_else(|e| {
         eprintln!("warning: failed to load saved state ({e}); starting fresh");
-        State::new()
+        State::default()
     });
 
     // Editor gives us: line editing, arrow-key history, Ctrl+A/E/K/W, etc.
