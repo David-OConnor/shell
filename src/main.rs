@@ -405,112 +405,29 @@ impl ConditionalEventHandler for BookmarkHandler {
     }
 }
 
-/// Rustyline key handler: prints the current bookmark list.
-struct ListBookmarksHandler {
-    bookmarks: Arc<Mutex<Vec<PathBuf>>>,
-    home: Option<PathBuf>,
-    printer: SharedPrinter,
+/// Which paginated list the arrow keys currently page through. Set when the
+/// user opens one of the lists (Ctrl+H / Ctrl+R / Alt+B); consulted by the
+/// shared Left/Right handler.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NavKind {
+    History,
+    RecentDirs,
+    Bookmarks,
 }
 
-impl ConditionalEventHandler for ListBookmarksHandler {
-    fn handle(
-        &self,
-        _evt: &Event,
-        _n: RepeatCount,
-        _positive: bool,
-        _ctx: &EventContext<'_>,
-    ) -> Option<Cmd> {
-        if let Ok(list) = self.bookmarks.lock() {
-            let mut msg =
-                String::from("\nBookmarks. Use `del bm <number>` to delete; e.g. `del bm 4`:\n");
-            msg.push_str(DIVIDER);
-            msg.push('\n');
-
-            if list.is_empty() {
-                msg.push_str("(no bookmarks)\n");
-            } else {
-                // We may use these displayed indexes so users can delete bookmarks etc.
-                for (i, bm) in list.iter().enumerate() {
-                    msg.push_str(&format!(
-                        "{i}:  {}\n",
-                        render_with_tilde(bm, self.home.as_deref())
-                    ));
-                }
-            }
-            msg.push_str(DIVIDER);
-            msg.push_str("\n\n");
-            if let Ok(mut p) = self.printer.lock() {
-                let _ = p.print(msg);
-            }
-        }
-        Some(Cmd::Noop)
-    }
-}
-
-/// Rustyline key handler: prints the recent-directories list (Ctrl+R).
-struct ListRecentDirsHandler {
-    recent_dirs: Arc<Mutex<Vec<RecentDir>>>,
-    /// Consulted so bookmarked recent dirs get a leading `*`, matching the
-    /// prompt convention.
-    bookmarks: Arc<Mutex<Vec<PathBuf>>>,
-    home: Option<PathBuf>,
-    printer: SharedPrinter,
-}
-
-impl ConditionalEventHandler for ListRecentDirsHandler {
-    fn handle(
-        &self,
-        _evt: &Event,
-        _n: RepeatCount,
-        _positive: bool,
-        _ctx: &EventContext<'_>,
-    ) -> Option<Cmd> {
-        if let Ok(list) = self.recent_dirs.lock() {
-            // Snapshot the bookmark set so we can mark each row without
-            // re-locking inside the render loop.
-            let bookmarks: Vec<PathBuf> =
-                self.bookmarks.lock().map(|b| b.clone()).unwrap_or_default();
-
-            let mut msg =
-                String::from("\nRecent directories. Use `cd <number>` to go; e.g. `cd 4`:\n");
-            msg.push_str(DIVIDER);
-            msg.push('\n');
-
-            if list.is_empty() {
-                msg.push_str("(no recent directories)\n");
-            } else {
-                // Vec is maintained oldest-first; newest sits at the bottom.
-                for (i, r) in list.iter().enumerate() {
-                    let star = if bookmarks.contains(&r.path) { "*" } else { "" };
-                    msg.push_str(&format!(
-                        "{i}:  {star}{}\n",
-                        render_with_tilde(&r.path, self.home.as_deref())
-                    ));
-                }
-            }
-            msg.push_str(DIVIDER);
-            msg.push_str("\n\n");
-            if let Ok(mut p) = self.printer.lock() {
-                let _ = p.print(msg);
-            }
-        }
-        Some(Cmd::Noop)
-    }
-}
-
-/// Tracks the user's position when paging through history with the arrow
-/// keys. Set by Ctrl+H; while `active`, Left/Right paginate when the input
-/// line is empty.
-struct HistoryNavState {
-    active: bool,
+/// Tracks the user's position when paging through one of the lists with
+/// the arrow keys.
+struct NavState {
+    /// `None` until a list is opened; then the kind of list being paged.
+    active: Option<NavKind>,
     /// 0 = most recent page (newest items, shown at the bottom).
     page: usize,
 }
 
-impl HistoryNavState {
+impl NavState {
     fn new() -> Self {
         Self {
-            active: false,
+            active: None,
             page: 0,
         }
     }
@@ -526,30 +443,41 @@ fn page_count(total: usize, per_page: usize) -> usize {
     }
 }
 
-/// Render one page of history. Page 0 = most recent items, with the newest
-/// at the bottom. Items are labelled with their absolute index into the
-/// history vec so the user can type `his <index>` to re-run them.
-fn render_history_page(history: &[HistoryItem], page: usize) -> String {
-    let total = history.len();
-    let pages = page_count(total, DISP_HIST_LEN);
+/// Render one page of a list: header with paging hint + usage hint, a
+/// page of rows, and a closing divider. Page 0 = the last `per_page`
+/// items (newest at the bottom). Rows are labelled with their absolute
+/// index into `items`, so the displayed number lines up with the
+/// corresponding `<cmd> <number>` invocation.
+fn render_page<T>(
+    title: &str,
+    usage_hint: &str,
+    empty_msg: &str,
+    items: &[T],
+    page: usize,
+    per_page: usize,
+    mut format_row: impl FnMut(usize, &T) -> String,
+) -> String {
+    let total = items.len();
+    let pages = page_count(total, per_page);
     let page = page.min(pages - 1);
 
-    let mut msg = String::from(
-        "\nHistory  (← older page  → newer page).  Use `his <number>` to run; e.g. `his 4`",
+    let mut msg = format!(
+        "\n{title}  (← older page  → newer page).  {usage_hint}.  Page {}/{}:\n",
+        page + 1,
+        pages
     );
-    msg.push_str(&format!(".  Page {}/{}:\n", page + 1, pages));
     msg.push_str(DIVIDER);
     msg.push('\n');
 
     if total == 0 {
-        msg.push_str("(no history)\n");
+        msg.push_str(empty_msg);
+        msg.push('\n');
     } else {
-        // page 0 covers the last DISP_HIST_LEN items; page 1 the previous
-        // DISP_HIST_LEN before that; etc. Newest sits at the bottom.
-        let end = total - page * DISP_HIST_LEN;
-        let start = end.saturating_sub(DISP_HIST_LEN);
+        let end = total - page * per_page;
+        let start = end.saturating_sub(per_page);
         for i in start..end {
-            msg.push_str(&format!("{i}:  {}\n", history[i].text));
+            msg.push_str(&format_row(i, &items[i]));
+            msg.push('\n');
         }
     }
     msg.push_str(DIVIDER);
@@ -557,15 +485,84 @@ fn render_history_page(history: &[HistoryItem], page: usize) -> String {
     msg
 }
 
-/// Rustyline key handler: prints a page of the command history. Ctrl+H
-/// always resets to the most recent page and re-enables arrow-key paging.
-struct ListHistoryHandler {
+fn render_history(history: &[HistoryItem], page: usize) -> String {
+    render_page(
+        "History",
+        "Use `his <number>` to run; e.g. `his 4`",
+        "(no history)",
+        history,
+        page,
+        DISP_HIST_LEN,
+        |i, item| format!("{i}:  {}", item.text),
+    )
+}
+
+fn render_recent_dirs(
+    recent: &[RecentDir],
+    bookmarks: &[PathBuf],
+    home: Option<&Path>,
+    page: usize,
+) -> String {
+    render_page(
+        "Recent directories",
+        "Use `cd <number>` to go; e.g. `cd 4`",
+        "(no recent directories)",
+        recent,
+        page,
+        DISP_HIST_LEN,
+        |i, r| {
+            let star = if bookmarks.contains(&r.path) { "*" } else { "" };
+            format!("{i}:  {star}{}", render_with_tilde(&r.path, home))
+        },
+    )
+}
+
+fn render_bookmarks(bookmarks: &[PathBuf], home: Option<&Path>, page: usize) -> String {
+    render_page(
+        "Bookmarks",
+        "Use `del bm <number>` to delete; e.g. `del bm 4`",
+        "(no bookmarks)",
+        bookmarks,
+        page,
+        DISP_HIST_LEN,
+        |i, bm| format!("{i}:  {}", render_with_tilde(bm, home)),
+    )
+}
+
+/// Rustyline key handler: opens one of the paginated lists (Ctrl+H for
+/// history, Ctrl+R for recent dirs, Alt+B for bookmarks). Resets paging to
+/// page 0 and marks this list as the active target for arrow-key paging.
+struct ShowListHandler {
+    kind: NavKind,
     history: Arc<Mutex<Vec<HistoryItem>>>,
-    nav: Arc<Mutex<HistoryNavState>>,
+    recent_dirs: Arc<Mutex<Vec<RecentDir>>>,
+    bookmarks: Arc<Mutex<Vec<PathBuf>>>,
+    home: Option<PathBuf>,
+    nav: Arc<Mutex<NavState>>,
     printer: SharedPrinter,
 }
 
-impl ConditionalEventHandler for ListHistoryHandler {
+impl ShowListHandler {
+    fn render(&self, page: usize) -> Option<String> {
+        match self.kind {
+            NavKind::History => {
+                let h = self.history.lock().ok()?;
+                Some(render_history(&h, page))
+            }
+            NavKind::RecentDirs => {
+                let r = self.recent_dirs.lock().ok()?;
+                let bm = self.bookmarks.lock().ok()?;
+                Some(render_recent_dirs(&r, &bm, self.home.as_deref(), page))
+            }
+            NavKind::Bookmarks => {
+                let bm = self.bookmarks.lock().ok()?;
+                Some(render_bookmarks(&bm, self.home.as_deref(), page))
+            }
+        }
+    }
+}
+
+impl ConditionalEventHandler for ShowListHandler {
     fn handle(
         &self,
         _evt: &Event,
@@ -573,38 +570,63 @@ impl ConditionalEventHandler for ListHistoryHandler {
         _positive: bool,
         _ctx: &EventContext<'_>,
     ) -> Option<Cmd> {
-        let msg = if let Ok(mut nav) = self.nav.lock() {
-            nav.active = true;
+        let msg = {
+            let mut nav = self.nav.lock().ok()?;
+            nav.active = Some(self.kind);
             nav.page = 0;
-            self.history
-                .lock()
-                .ok()
-                .map(|h| render_history_page(&h, nav.page))
-        } else {
-            None
+            self.render(0)?
         };
-        if let Some(msg) = msg {
-            if let Ok(mut p) = self.printer.lock() {
-                let _ = p.print(msg);
-            }
+        if let Ok(mut p) = self.printer.lock() {
+            let _ = p.print(msg);
         }
         Some(Cmd::Noop)
     }
 }
 
-/// Rustyline key handler bound to Left/Right when history paging is active.
-/// `delta == +1` moves to an older page; `delta == -1` moves to a newer one.
-/// Only steals the keystroke when paging is active *and* the input line is
-/// empty — otherwise it returns `None` so rustyline does its usual cursor
-/// movement.
-struct HistoryPageHandler {
+/// Rustyline key handler bound to Left/Right while one of the lists is
+/// active. `delta == +1` moves to an older page; `delta == -1` moves to a
+/// newer one. Only steals the keystroke when paging is active *and* the
+/// input line is empty — otherwise it returns `None` so rustyline does its
+/// usual cursor movement.
+struct PageHandler {
     history: Arc<Mutex<Vec<HistoryItem>>>,
-    nav: Arc<Mutex<HistoryNavState>>,
+    recent_dirs: Arc<Mutex<Vec<RecentDir>>>,
+    bookmarks: Arc<Mutex<Vec<PathBuf>>>,
+    home: Option<PathBuf>,
+    nav: Arc<Mutex<NavState>>,
     printer: SharedPrinter,
     delta: i32,
 }
 
-impl ConditionalEventHandler for HistoryPageHandler {
+impl PageHandler {
+    fn total(&self, kind: NavKind) -> Option<usize> {
+        Some(match kind {
+            NavKind::History => self.history.lock().ok()?.len(),
+            NavKind::RecentDirs => self.recent_dirs.lock().ok()?.len(),
+            NavKind::Bookmarks => self.bookmarks.lock().ok()?.len(),
+        })
+    }
+
+    fn render(&self, kind: NavKind, page: usize) -> Option<String> {
+        match kind {
+            NavKind::History => {
+                let h = self.history.lock().ok()?;
+                Some(render_history(&h, page))
+            }
+            NavKind::RecentDirs => {
+                let r = self.recent_dirs.lock().ok()?;
+                let bm = self.bookmarks.lock().ok()?;
+                Some(render_recent_dirs(&r, &bm, self.home.as_deref(), page))
+            }
+            NavKind::Bookmarks => {
+                let bm = self.bookmarks.lock().ok()?;
+                Some(render_bookmarks(&bm, self.home.as_deref(), page))
+            }
+        }
+    }
+}
+
+impl ConditionalEventHandler for PageHandler {
     fn handle(
         &self,
         _evt: &Event,
@@ -616,18 +638,12 @@ impl ConditionalEventHandler for HistoryPageHandler {
             return None;
         }
 
-        let (active, _) = match self.nav.lock() {
-            Ok(n) => (n.active, n.page),
-            Err(_) => return None,
-        };
-        if !active {
-            return None;
-        }
+        let kind = self.nav.lock().ok()?.active?;
+        let total = self.total(kind)?;
+        let pages = page_count(total, DISP_HIST_LEN);
 
         let msg = {
-            let hist = self.history.lock().ok()?;
             let mut nav = self.nav.lock().ok()?;
-            let pages = page_count(hist.len(), DISP_HIST_LEN);
             let new_page = if self.delta > 0 {
                 (nav.page + 1).min(pages - 1)
             } else {
@@ -638,7 +654,8 @@ impl ConditionalEventHandler for HistoryPageHandler {
                 return Some(Cmd::Noop);
             }
             nav.page = new_page;
-            render_history_page(&hist, nav.page)
+            drop(nav);
+            self.render(kind, new_page)?
         };
         if let Ok(mut p) = self.printer.lock() {
             let _ = p.print(msg);
@@ -918,12 +935,21 @@ fn main() {
         })),
     );
 
+    // Shared paging state. Each list-opening keypress sets the active kind
+    // and resets to page 0; Left/Right then page through that list while
+    // the input buffer stays empty.
+    let nav = Arc::new(Mutex::new(NavState::new()));
+
     // Alt + B: Display the current bookmark list.
     rl.bind_sequence(
         KeyEvent::new('b', Modifiers::ALT),
-        EventHandler::Conditional(Box::new(ListBookmarksHandler {
+        EventHandler::Conditional(Box::new(ShowListHandler {
+            kind: NavKind::Bookmarks,
+            history: state.history.clone(),
+            recent_dirs: state.recent_dirs.clone(),
             bookmarks: state.dir_bookmarks.clone(),
             home: home.clone(),
+            nav: nav.clone(),
             printer: printer.clone(),
         })),
     );
@@ -932,46 +958,54 @@ fn main() {
     // default reverse-i-search binding, which this shell doesn't use.
     rl.bind_sequence(
         KeyEvent::new('r', Modifiers::CTRL),
-        EventHandler::Conditional(Box::new(ListRecentDirsHandler {
+        EventHandler::Conditional(Box::new(ShowListHandler {
+            kind: NavKind::RecentDirs,
+            history: state.history.clone(),
             recent_dirs: state.recent_dirs.clone(),
             bookmarks: state.dir_bookmarks.clone(),
             home: home.clone(),
+            nav: nav.clone(),
             printer: printer.clone(),
         })),
     );
-
-    // Shared paging state for the history viewer. Ctrl+H sets it active and
-    // resets to the most recent page; Left/Right adjust the page while it
-    // remains active and the input line is empty.
-    let history_nav = Arc::new(Mutex::new(HistoryNavState::new()));
 
     // Ctrl + H: Display recent history
     rl.bind_sequence(
         KeyEvent::new('h', Modifiers::CTRL),
-        EventHandler::Conditional(Box::new(ListHistoryHandler {
+        EventHandler::Conditional(Box::new(ShowListHandler {
+            kind: NavKind::History,
             history: state.history.clone(),
-            nav: history_nav.clone(),
+            recent_dirs: state.recent_dirs.clone(),
+            bookmarks: state.dir_bookmarks.clone(),
+            home: home.clone(),
+            nav: nav.clone(),
             printer: printer.clone(),
         })),
     );
 
-    // ← / → : page through history once Ctrl+H has been pressed. The handlers
-    // return `None` when the buffer is non-empty or paging isn't active, so
+    // ← / → : page through whichever list is currently active. The handlers
+    // return `None` when the buffer is non-empty or no list is active, so
     // normal cursor movement still works the rest of the time.
     rl.bind_sequence(
         KeyEvent(KeyCode::Left, Modifiers::NONE),
-        EventHandler::Conditional(Box::new(HistoryPageHandler {
+        EventHandler::Conditional(Box::new(PageHandler {
             history: state.history.clone(),
-            nav: history_nav.clone(),
+            recent_dirs: state.recent_dirs.clone(),
+            bookmarks: state.dir_bookmarks.clone(),
+            home: home.clone(),
+            nav: nav.clone(),
             printer: printer.clone(),
             delta: 1,
         })),
     );
     rl.bind_sequence(
         KeyEvent(KeyCode::Right, Modifiers::NONE),
-        EventHandler::Conditional(Box::new(HistoryPageHandler {
+        EventHandler::Conditional(Box::new(PageHandler {
             history: state.history.clone(),
-            nav: history_nav.clone(),
+            recent_dirs: state.recent_dirs.clone(),
+            bookmarks: state.dir_bookmarks.clone(),
+            home: home.clone(),
+            nav: nav.clone(),
             printer: printer.clone(),
             delta: -1,
         })),
