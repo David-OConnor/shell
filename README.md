@@ -51,14 +51,22 @@ sync "A commit message"
 sync A commit message
 ```
 
+
 Warning: This isn't suitable for all workflows. If you use git in a way where it isn't appropriate to sync all gitignored files, this may have unintended consequences!
+
+### Linux: JournalCtl logs:
+Run `logs <service>`, to view the recent Journalctl logs. Linux only. For example, this runs:
+`sudo journalctl -u gunicorn -f` for the gunicorn service.
+
 
 
 ### Typed commands
 - `exit` or `quit`: Exit the program.
 - `sync`: Run `git add .`, `git commit -am <the commit message>`, and `git push`.
+- `logs`: Runs journalctl -u -f with the service.
 - `del bm <number>`: Delete a bookmark by number. 
 - `his <number>`: Execute a command from history.
+- `hisd <number>`: Execute a command from history, in its original working dir.
 - `cat`: Displays the contents of a (generally text) file. Similar to the standard Linux operation, but
 also works on Windows.
 - `cd <number>`: Go to this recent directory (As listed with Ctrl + R)
@@ -67,7 +75,14 @@ also works on Windows.
 
 ## Key commands
 - Enter key: Send input
-- Arrow keys:
+- ↑ / ↓: Walk through previously-entered history items (across all directories)
+  and load each into the input. Replaces the OS shell's default history
+  behaviour. A green ` his N` indicator next to the prompt shows the current
+  item — e.g. `S <cwd> his 29 $ ...`.
+- ← / →: Walk through recent directories. Each step loads `cd <path>` into
+  the input and shows a green ` cd N` indicator next to the prompt; Enter
+  goes there. Left/Right still move the caret when the input has text and
+  no cd recall is active.
 - Tab key: while using with cd, autocompletes, including to bookmarks.
 
 ### Recent or frequent commands

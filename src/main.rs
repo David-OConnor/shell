@@ -8,18 +8,26 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use chrono::{DateTime, Utc};
-use shell::{RecentDir, get_home, path_from_args, save_data};
+use chrono::Utc;
+use shell::commands::{self, OutKind};
+use shell::{NavState, get_home, path_from_args, save_data};
 use rustyline::{
-    Cmd, CompletionType, ConditionalEventHandler, Config, Context, Editor, Event, EventContext,
-    EventHandler, ExternalPrinter, Helper, KeyCode, KeyEvent, Modifiers, RepeatCount,
-    completion::{Completer, FilenameCompleter, Pair},
-    error::ReadlineError,
-    highlight::Highlighter,
-    hint::Hinter,
-    history::FileHistory,
-    validate::Validator,
+    completion::{Completer, FilenameCompleter, Pair}, error::ReadlineError, highlight::Highlighter, hint::Hinter, history::FileHistory, validate::Validator, Cmd, CompletionType,
+    ConditionalEventHandler, Config, Context, Editor, Event, EventContext, EventHandler,
+    ExternalPrinter,
+    Helper,
+    KeyCode,
+    KeyEvent,
+    Modifiers,
+    RepeatCount,
 };
+use shell::state::{HistoryItem, RecentDir};
+
+// Markers `highlight_prompt` looks for when colouring the recall indicators
+// (` his N`, ` cd N`) light green. The leading space is part of the marker
+// so a cwd that happens to contain "his" or "cd" mid-path doesn't match.
+const HIS_PREFIX: &str = " his ";
+const CD_PREFIX: &str = " cd ";
 
 /// Shared handle to rustyline's `ExternalPrinter`. Key handlers use this to
 /// print messages *above* the in-progress prompt line — going through
@@ -44,11 +52,6 @@ const COLOR_ORANGE: &str = "\x1b[38;5;208m"; // quote characters `'` and `"`
 const DISP_HIST_LEN: usize = 20;
 
 const DIVIDER: &str = "----------";
-
-struct HistoryItem {
-    pub text: String,
-    pub dt: DateTime<Utc>,
-}
 
 // todo: Instead of storing these Arc<Mutex>>s, perhaps we do it some other way; this is due
 // todo: due to how Rustyline expects it.
@@ -82,8 +85,12 @@ impl Default for State {
 }
 
 impl State {
-    /// This defines what the general prompt looks like. Its adorning characters let the user know they're in this shell.
-    fn prompt(&self) -> String {
+    /// This defines what the general prompt looks like. Its adorning
+    /// characters let the user know they're in this shell. `nav` carries
+    /// the active recall cursors (see [NavState]); when either is `Some`,
+    /// the prompt grows by ` his N` or ` cd N` before the `$` to indicate
+    /// which item is currently loaded into the input.
+    fn prompt(&self, nav: &NavState) -> String {
         // Mark the directory with a leading `*` when it's bookmarked.
         let bookmarked = self
             .dir_bookmarks
@@ -91,13 +98,18 @@ impl State {
             .map(|list| list.contains(&self.cwd))
             .unwrap_or(false);
         let star = if bookmarked { "*" } else { "" };
-        format!("S {star}{} $ ", self.cwd.display())
+        format!(
+            "S {star}{}{}{} $ ",
+            self.cwd.display(),
+            nav.his_indicator(),
+            nav.cd_indicator(),
+        )
     }
 
-    /// Persist user-controlled state (bookmarks + recent dirs) to the given
-    /// file. Called after every mutation of either list. Locks bookmarks
-    /// before recent_dirs — keep this order consistent across all callers
-    /// to avoid lock-order deadlocks.
+    /// Persist user-controlled state (bookmarks + recent dirs + history) to
+    /// the given file. Called after every mutation of any of them. Locks in
+    /// the order bookmarks → recent_dirs → history — keep this order
+    /// consistent across all callers to avoid lock-order deadlocks.
     pub fn save(&self, path: &Path) -> io::Result<()> {
         let bookmarks = self
             .dir_bookmarks
@@ -107,18 +119,22 @@ impl State {
             .recent_dirs
             .lock()
             .map_err(|_| io::Error::new(io::ErrorKind::Other, "recent-dirs lock poisoned"))?;
-        save_data::save_state(&bookmarks, &recent, path)
+        let history = self
+            .history
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "history lock poisoned"))?;
+        save_data::save_state(&bookmarks, &recent, &history, path)
     }
 
     /// Restore state from disk, returning a fresh `State` with that data.
     /// A missing file is treated as "no saved state" and yields the default
     /// `State::new()` values (not an error).
     pub fn load(path: &Path) -> io::Result<Self> {
-        let (bookmarks, recent_dirs) = save_data::load_state(path)?;
+        let (bookmarks, recent_dirs, history) = save_data::load_state(path)?;
 
         Ok(Self {
             home: get_home(),
-            history: Arc::new(Mutex::new(Vec::new())),
+            history: Arc::new(Mutex::new(history)),
             cwd: env::current_dir().unwrap_or_default(),
             dir_bookmarks: Arc::new(Mutex::new(bookmarks)),
             recent_dirs: Arc::new(Mutex::new(recent_dirs)),
@@ -312,8 +328,11 @@ fn highlight_input(line: &str) -> String {
 
 impl Highlighter for ShellHelper {
     /// Color the `S` and `$` accents in the prompt yellow, leaving the
-    /// directory in its default terminal color. Prompt shape from
-    /// `State::prompt` is `"S <cwd> $ "`.
+    /// directory in its default terminal color. When the prompt carries a
+    /// recall indicator (` his N` or ` cd N` between the cwd and the `$`),
+    /// that portion is coloured light green. Prompt shape from
+    /// `State::prompt` is `"S <cwd>[ his N][ cd N] $ "` (at most one of
+    /// the two indicators is present at a time — see [NavState]).
     fn highlight_prompt<'b, 's: 'b, 'p: 'b>(
         &'s self,
         prompt: &'p str,
@@ -321,10 +340,30 @@ impl Highlighter for ShellHelper {
     ) -> Cow<'b, str> {
         if let Some(rest) = prompt.strip_prefix("S ") {
             if let Some(dollar_idx) = rest.rfind(" $ ") {
-                let dir = &rest[..dollar_idx];
+                let body = &rest[..dollar_idx];
                 let tail = &rest[dollar_idx + 3..]; // usually empty
+                // Pull off the trailing ` his N` / ` cd N` indicator if
+                // present, so we can render it in a different colour from
+                // the dir. Search from the right and prefer whichever
+                // marker is closer to the `$`.
+                let his_at = body.rfind(HIS_PREFIX);
+                let cd_at = body.rfind(CD_PREFIX);
+                let indicator_at = match (his_at, cd_at) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (Some(a), None) => Some(a),
+                    (None, Some(b)) => Some(b),
+                    (None, None) => None,
+                };
+                let (dir, indicator) = match indicator_at {
+                    Some(i) => (&body[..i], Some(&body[i + 1..])),
+                    None => (body, None),
+                };
+                let indicator_part = match indicator {
+                    Some(ind) => format!(" {COLOR_GREEN}{ind}{COLOR_RESET}"),
+                    None => String::new(),
+                };
                 return Cow::Owned(format!(
-                    "{COLOR_YELLOW}S{COLOR_RESET} {dir} {COLOR_YELLOW}${COLOR_RESET} {tail}"
+                    "{COLOR_YELLOW}S{COLOR_RESET} {dir}{indicator_part} {COLOR_YELLOW}${COLOR_RESET} {tail}"
                 ));
             }
         }
@@ -357,9 +396,10 @@ impl Helper for ShellHelper {}
 /// the list to disk on every successful add.
 struct BookmarkHandler {
     bookmarks: Arc<Mutex<Vec<PathBuf>>>,
-    /// Held so we can write the full state file (bookmarks + recent dirs)
-    /// in a single pass when a bookmark is added.
+    /// Held so we can write the full state file (bookmarks + recent dirs +
+    /// history) in a single pass when a bookmark is added.
     recent_dirs: Arc<Mutex<Vec<RecentDir>>>,
+    history: Arc<Mutex<Vec<HistoryItem>>>,
     save_path: PathBuf,
     printer: SharedPrinter,
 }
@@ -379,11 +419,18 @@ impl ConditionalEventHandler for BookmarkHandler {
                 } else {
                     let msg = format!("Added a bookmark: {}\n", cwd.display());
                     list.push(cwd);
-                    // Lock recent_dirs after bookmarks — same order as
-                    // State::save, so no lock-order conflicts.
+                    // Lock recent_dirs and history after bookmarks — same
+                    // order as State::save, so no lock-order conflicts.
                     if let Ok(recent) = self.recent_dirs.lock() {
-                        if let Err(e) = save_data::save_state(&list, &recent, &self.save_path) {
-                            eprintln!("warning: failed to save state: {e}");
+                        if let Ok(history) = self.history.lock() {
+                            if let Err(e) = save_data::save_state(
+                                &list,
+                                &recent,
+                                &history,
+                                &self.save_path,
+                            ) {
+                                eprintln!("warning: failed to save state: {e}");
+                            }
                         }
                     }
                     msg
@@ -400,9 +447,7 @@ impl ConditionalEventHandler for BookmarkHandler {
     }
 }
 
-/// Which paginated list the arrow keys currently page through. Set when the
-/// user opens one of the lists (Ctrl+H / Ctrl+R / Alt+B); consulted by the
-/// shared Left/Right handler.
+/// Which paginated list a Ctrl+H / Ctrl+R / Alt+B keystroke opens.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum NavKind {
     History,
@@ -410,20 +455,101 @@ enum NavKind {
     Bookmarks,
 }
 
-/// Tracks the user's position when paging through one of the lists with
-/// the arrow keys.
-struct NavState {
-    /// `None` until a list is opened; then the kind of list being paged.
-    active: Option<NavKind>,
-    /// 0 = most recent page (newest items, shown at the bottom).
-    page: usize,
+/// Which recall axis a key handler steps. Up/Down → His (`state.history`);
+/// Left/Right → Cd (`state.recent_dirs`).
+#[derive(Clone, Copy)]
+enum NavAxis {
+    His,
+    Cd,
 }
 
-impl NavState {
+/// CLI-side wrapper around the shared [NavState]. Adds the `pending_restart`
+/// channel: when an arrow handler successfully walks one of the recall
+/// lists, it stores the buffer text it wants the next `readline()` to start
+/// with here and bails out via [Cmd::Interrupt] so the main loop can
+/// re-render the prompt with the matching indicator baked in (rustyline
+/// can't change a prompt mid-line — see [State::prompt]).
+struct CliNav {
+    nav: NavState,
+    pending_restart: Option<String>,
+}
+
+impl CliNav {
     fn new() -> Self {
         Self {
-            active: None,
-            page: 0,
+            nav: NavState::new(),
+            pending_restart: None,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.nav.reset();
+        self.pending_restart = None;
+    }
+}
+
+/// Rustyline key handler bound to one of the four arrow keys. On a
+/// successful step it stores the new buffer text in `pending_restart` and
+/// returns `Cmd::Interrupt` so the main loop can tear the prompt down and
+/// re-call `readline_with_initial` with an updated prompt that includes
+/// the matching ` his N` or ` cd N` indicator.
+///
+/// Left/Right only steal the keystroke when the input buffer is empty
+/// *or* a cd recall is already active — otherwise they fall through to
+/// rustyline's default cursor movement so the user can still edit the line.
+/// Up/Down don't have that conflict (there's nowhere for them to move in a
+/// single-line buffer) so they always step.
+struct ArrowHandler {
+    history: Arc<Mutex<Vec<HistoryItem>>>,
+    recent_dirs: Arc<Mutex<Vec<RecentDir>>>,
+    home: Option<PathBuf>,
+    nav: Arc<Mutex<CliNav>>,
+    axis: NavAxis,
+    /// Direction: Up / Left ⇒ `true` (older); Down / Right ⇒ `false`.
+    backward: bool,
+}
+
+impl ConditionalEventHandler for ArrowHandler {
+    fn handle(
+        &self,
+        _evt: &Event,
+        _n: RepeatCount,
+        _positive: bool,
+        ctx: &EventContext<'_>,
+    ) -> Option<Cmd> {
+        let mut nav = self.nav.lock().ok()?;
+        match self.axis {
+            NavAxis::His => {
+                let history = self.history.lock().ok()?;
+                match nav.nav.step_his(&history, self.backward, ctx.line()) {
+                    Some(text) => {
+                        nav.pending_restart = Some(text);
+                        Some(Cmd::Interrupt)
+                    }
+                    None => Some(Cmd::Noop),
+                }
+            }
+            NavAxis::Cd => {
+                // Preserve normal cursor movement when the user is editing.
+                if !ctx.line().is_empty() && nav.nav.cd_cursor.is_none() {
+                    return None;
+                }
+                let recent = self.recent_dirs.lock().ok()?;
+                let home = self.home.clone();
+                let result = nav.nav.step_cd(
+                    &recent,
+                    self.backward,
+                    ctx.line(),
+                    |path| format!("cd {}", render_with_tilde(path, home.as_deref())),
+                );
+                match result {
+                    Some(text) => {
+                        nav.pending_restart = Some(text);
+                        Some(Cmd::Interrupt)
+                    }
+                    None => Some(Cmd::Noop),
+                }
+            }
         }
     }
 }
@@ -524,34 +650,34 @@ fn render_bookmarks(bookmarks: &[PathBuf], home: Option<&Path>, page: usize) -> 
     )
 }
 
-/// Rustyline key handler: opens one of the paginated lists (Ctrl+H for
-/// history, Ctrl+R for recent dirs, Alt+B for bookmarks). Resets paging to
-/// page 0 and marks this list as the active target for arrow-key paging.
+/// Rustyline key handler: prints one of the paginated lists (Ctrl+H for
+/// history, Ctrl+R for recent dirs, Alt+B for bookmarks) above the prompt.
+/// Only ever shows page 0 — Left/Right are now bound to recent-dir recall,
+/// so multi-page browsing isn't available from the prompt.
 struct ShowListHandler {
     kind: NavKind,
     history: Arc<Mutex<Vec<HistoryItem>>>,
     recent_dirs: Arc<Mutex<Vec<RecentDir>>>,
     bookmarks: Arc<Mutex<Vec<PathBuf>>>,
     home: Option<PathBuf>,
-    nav: Arc<Mutex<NavState>>,
     printer: SharedPrinter,
 }
 
 impl ShowListHandler {
-    fn render(&self, page: usize) -> Option<String> {
+    fn render(&self) -> Option<String> {
         match self.kind {
             NavKind::History => {
                 let h = self.history.lock().ok()?;
-                Some(render_history(&h, page))
+                Some(render_history(&h, 0))
             }
             NavKind::RecentDirs => {
                 let r = self.recent_dirs.lock().ok()?;
                 let bm = self.bookmarks.lock().ok()?;
-                Some(render_recent_dirs(&r, &bm, self.home.as_deref(), page))
+                Some(render_recent_dirs(&r, &bm, self.home.as_deref(), 0))
             }
             NavKind::Bookmarks => {
                 let bm = self.bookmarks.lock().ok()?;
-                Some(render_bookmarks(&bm, self.home.as_deref(), page))
+                Some(render_bookmarks(&bm, self.home.as_deref(), 0))
             }
         }
     }
@@ -565,95 +691,10 @@ impl ConditionalEventHandler for ShowListHandler {
         _positive: bool,
         _ctx: &EventContext<'_>,
     ) -> Option<Cmd> {
-        let msg = {
-            let mut nav = self.nav.lock().ok()?;
-            nav.active = Some(self.kind);
-            nav.page = 0;
-            self.render(0)?
-        };
-        if let Ok(mut p) = self.printer.lock() {
-            let _ = p.print(msg);
-        }
-        Some(Cmd::Noop)
-    }
-}
-
-/// Rustyline key handler bound to Left/Right while one of the lists is
-/// active. `delta == +1` moves to an older page; `delta == -1` moves to a
-/// newer one. Only steals the keystroke when paging is active *and* the
-/// input line is empty — otherwise it returns `None` so rustyline does its
-/// usual cursor movement.
-struct PageHandler {
-    history: Arc<Mutex<Vec<HistoryItem>>>,
-    recent_dirs: Arc<Mutex<Vec<RecentDir>>>,
-    bookmarks: Arc<Mutex<Vec<PathBuf>>>,
-    home: Option<PathBuf>,
-    nav: Arc<Mutex<NavState>>,
-    printer: SharedPrinter,
-    delta: i32,
-}
-
-impl PageHandler {
-    fn total(&self, kind: NavKind) -> Option<usize> {
-        Some(match kind {
-            NavKind::History => self.history.lock().ok()?.len(),
-            NavKind::RecentDirs => self.recent_dirs.lock().ok()?.len(),
-            NavKind::Bookmarks => self.bookmarks.lock().ok()?.len(),
-        })
-    }
-
-    fn render(&self, kind: NavKind, page: usize) -> Option<String> {
-        match kind {
-            NavKind::History => {
-                let h = self.history.lock().ok()?;
-                Some(render_history(&h, page))
+        if let Some(msg) = self.render() {
+            if let Ok(mut p) = self.printer.lock() {
+                let _ = p.print(msg);
             }
-            NavKind::RecentDirs => {
-                let r = self.recent_dirs.lock().ok()?;
-                let bm = self.bookmarks.lock().ok()?;
-                Some(render_recent_dirs(&r, &bm, self.home.as_deref(), page))
-            }
-            NavKind::Bookmarks => {
-                let bm = self.bookmarks.lock().ok()?;
-                Some(render_bookmarks(&bm, self.home.as_deref(), page))
-            }
-        }
-    }
-}
-
-impl ConditionalEventHandler for PageHandler {
-    fn handle(
-        &self,
-        _evt: &Event,
-        _n: RepeatCount,
-        _positive: bool,
-        ctx: &EventContext<'_>,
-    ) -> Option<Cmd> {
-        if !ctx.line().is_empty() {
-            return None;
-        }
-
-        let kind = self.nav.lock().ok()?.active?;
-        let total = self.total(kind)?;
-        let pages = page_count(total, DISP_HIST_LEN);
-
-        let msg = {
-            let mut nav = self.nav.lock().ok()?;
-            let new_page = if self.delta > 0 {
-                (nav.page + 1).min(pages - 1)
-            } else {
-                nav.page.saturating_sub(1)
-            };
-            if new_page == nav.page {
-                // Already at the edge — consume the key but skip the redraw.
-                return Some(Cmd::Noop);
-            }
-            nav.page = new_page;
-            drop(nav);
-            self.render(kind, new_page)?
-        };
-        if let Ok(mut p) = self.printer.lock() {
-            let _ = p.print(msg);
         }
         Some(Cmd::Noop)
     }
@@ -709,48 +750,93 @@ fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
         return true;
     }
 
+    // `hisd <n>` re-runs a previous history item in its original working
+    // directory, without changing the shell's CWD. Bypasses the built-in
+    // dispatcher and shells the command out directly, since the point is to
+    // run it elsewhere on the filesystem.
+    if cmd == "hisd" {
+        match args.parse::<usize>() {
+            Ok(idx) => {
+                let resolved = state
+                    .history
+                    .lock()
+                    .ok()
+                    .and_then(|h| h.get(idx).map(|item| (item.text.clone(), item.dir.clone())));
+                match resolved {
+                    Some((text, dir)) => {
+                        println!("> {text}  (in {})", dir.display());
+                        let result = if cfg!(windows) {
+                            Command::new("pwsh")
+                                .args(["-NoProfile", "-NoLogo", "-Command", &text])
+                                .current_dir(&dir)
+                                .status()
+                        } else {
+                            Command::new("sh")
+                                .args(["-c", text.as_str()])
+                                .current_dir(&dir)
+                                .status()
+                        };
+                        if let Err(e) = result {
+                            eprintln!("shell: {e}");
+                        }
+                    }
+                    None => eprintln!("hisd: no history item at index {idx}"),
+                }
+            }
+            Err(_) => eprintln!("hisd: usage: hisd <number>"),
+        }
+        return true;
+    }
+
     if let Ok(mut hist) = state.history.lock() {
         hist.push(HistoryItem {
             text: input.to_string(),
+            dir: state.cwd.clone(),
             dt: Utc::now(),
         });
     }
 
     // Track directories we've run real commands from (everything except `cd`),
-    // so Ctrl+R / `cd <number>` can jump back to them.
+    // so Ctrl+R / `cd <number>` can jump back to them. We always save below
+    // regardless, to flush the new history entry to disk.
     if cmd != "cd" {
         let cwd = state.cwd.clone();
         record_recent_dir(&state.recent_dirs, &cwd);
-        if let Err(e) = state.save(state_path) {
-            eprintln!("warning: failed to save recent dirs: {e}");
-        }
+    }
+    if let Err(e) = state.save(state_path) {
+        eprintln!("warning: failed to save state: {e}");
     }
 
     match cmd {
         "exit" | "quit" => return false,
 
         "sync" => {
-            let message = args.trim().trim_matches('"');
-
-            if message.is_empty() {
-                eprintln!("sync: commit message required, e.g. sync \"my commit message\"");
-            } else {
-                let steps: [&[&str]; 3] = [&["add", "."], &["commit", "-am", message], &["push"]];
-
-                for step in steps {
-                    match Command::new("git").args(step).status() {
-                        Ok(status) if !status.success() => {
-                            eprintln!("sync: `git {}` failed", step.join(" "));
-                            break;
-                        }
-                        Err(e) => {
-                            eprintln!("sync: failed to run git: {e}");
-                            break;
-                        }
-                        _ => {}
-                    }
+            // Delegate to the shared implementation; route its sink output
+            // to stdout/stderr. Trim trailing newlines so we don't double up
+            // on the ones println! adds — git output already ends with `\n`.
+            let cwd = state.cwd.clone();
+            let mut sink = |kind, msg: String| {
+                let msg = msg.trim_end_matches('\n');
+                match kind {
+                    OutKind::Stdout => println!("{msg}"),
+                    OutKind::Stderr => eprintln!("{msg}"),
                 }
-            }
+            };
+            commands::sync(args, &cwd, &mut sink);
+        }
+
+        "logs" => {
+            // CLI uses `follow = true` so the user gets a live tail via
+            // inherited stdio; Ctrl+C exits journalctl and returns control
+            // to the shell. On non-Linux this is a no-op error via the sink.
+            let mut sink = |kind, msg: String| {
+                let msg = msg.trim_end_matches('\n');
+                match kind {
+                    OutKind::Stdout => println!("{msg}"),
+                    OutKind::Stderr => eprintln!("{msg}"),
+                }
+            };
+            commands::logs(args, true, &mut sink);
         }
 
         // On linux, this is likely the same as the system `cat` command, but it works on Windows.
@@ -808,30 +894,60 @@ fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
             // `cd <number>` (with nothing else after) jumps to a recent
             // directory by its Ctrl+R index. Anything else is resolved as a
             // normal path/bookmark argument.
-            let target = if let Ok(idx) = args.parse::<usize>() {
+            // When the arg parses as a number we treat it as a recent-dir
+            // index; remember the index so we can prune the entry if its
+            // path is stale (deleted/moved on disk).
+            let (target, recent_idx) = if let Ok(idx) = args.parse::<usize>() {
                 let resolved = state
                     .recent_dirs
                     .lock()
                     .ok()
                     .and_then(|list| list.get(idx).map(|r| r.path.clone()));
                 match resolved {
-                    Some(p) => Some(p),
+                    Some(p) => (Some(p), Some(idx)),
                     None => {
                         eprintln!("cd: no recent directory at index {idx}");
-                        None
+                        (None, None)
                     }
                 }
             } else {
                 let bookmarks = state.dir_bookmarks.lock();
                 let slice: &[PathBuf] =
                     bookmarks.as_deref().map(|v| v.as_slice()).unwrap_or(&[]);
-                Some(path_from_args(state.home.as_deref(), &state.cwd, slice, args))
+                (
+                    Some(path_from_args(state.home.as_deref(), &state.cwd, slice, args)),
+                    None,
+                )
             };
 
             if let Some(target) = target {
                 match env::set_current_dir(&target) {
                     Ok(_) => state.cwd = env::current_dir().unwrap_or(target),
-                    Err(e) => eprintln!("cd: {e}"),
+                    Err(e) => {
+                        eprintln!("cd: {e}");
+                        // If the recent-dir entry's path no longer exists on
+                        // disk, prune it so the indices shift down and the
+                        // user doesn't hit the same stale row forever.
+                        if e.kind() == io::ErrorKind::NotFound {
+                            if let Some(i) = recent_idx {
+                                let mut removed = false;
+                                if let Ok(mut list) = state.recent_dirs.lock() {
+                                    if list.get(i).map(|r| r.path == target).unwrap_or(false) {
+                                        list.remove(i);
+                                        removed = true;
+                                    }
+                                }
+                                if removed {
+                                    eprintln!(
+                                        "cd: removed stale recent-dir entry {i}"
+                                    );
+                                    if let Err(e) = state.save(state_path) {
+                                        eprintln!("warning: failed to save state: {e}");
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -931,15 +1047,11 @@ fn main() {
         EventHandler::Conditional(Box::new(BookmarkHandler {
             bookmarks: state.dir_bookmarks.clone(),
             recent_dirs: state.recent_dirs.clone(),
+            history: state.history.clone(),
             save_path: state_path.clone(),
             printer: printer.clone(),
         })),
     );
-
-    // Shared paging state. Each list-opening keypress sets the active kind
-    // and resets to page 0; Left/Right then page through that list while
-    // the input buffer stays empty.
-    let nav = Arc::new(Mutex::new(NavState::new()));
 
     // Alt + B: Display the current bookmark list.
     rl.bind_sequence(
@@ -950,7 +1062,6 @@ fn main() {
             recent_dirs: state.recent_dirs.clone(),
             bookmarks: state.dir_bookmarks.clone(),
             home: home.clone(),
-            nav: nav.clone(),
             printer: printer.clone(),
         })),
     );
@@ -965,7 +1076,6 @@ fn main() {
             recent_dirs: state.recent_dirs.clone(),
             bookmarks: state.dir_bookmarks.clone(),
             home: home.clone(),
-            nav: nav.clone(),
             printer: printer.clone(),
         })),
     );
@@ -979,42 +1089,67 @@ fn main() {
             recent_dirs: state.recent_dirs.clone(),
             bookmarks: state.dir_bookmarks.clone(),
             home: home.clone(),
-            nav: nav.clone(),
             printer: printer.clone(),
         })),
     );
 
-    // ← / → : page through whichever list is currently active. The handlers
-    // return `None` when the buffer is non-empty or no list is active, so
-    // normal cursor movement still works the rest of the time.
+    // Arrow-key recall: ↑/↓ walk `state.history`; ←/→ walk `state.recent_dirs`.
+    // All four bail out via Cmd::Interrupt so the main loop can rebuild the
+    // prompt with a `his N` / `cd N` indicator (rustyline can't change a
+    // prompt mid-line).
+    let hist_nav = Arc::new(Mutex::new(CliNav::new()));
+    let bind_arrow = |axis: NavAxis, backward: bool| ArrowHandler {
+        history: state.history.clone(),
+        recent_dirs: state.recent_dirs.clone(),
+        home: home.clone(),
+        nav: hist_nav.clone(),
+        axis,
+        backward,
+    };
+    rl.bind_sequence(
+        KeyEvent(KeyCode::Up, Modifiers::NONE),
+        EventHandler::Conditional(Box::new(bind_arrow(NavAxis::His, true))),
+    );
+    rl.bind_sequence(
+        KeyEvent(KeyCode::Down, Modifiers::NONE),
+        EventHandler::Conditional(Box::new(bind_arrow(NavAxis::His, false))),
+    );
     rl.bind_sequence(
         KeyEvent(KeyCode::Left, Modifiers::NONE),
-        EventHandler::Conditional(Box::new(PageHandler {
-            history: state.history.clone(),
-            recent_dirs: state.recent_dirs.clone(),
-            bookmarks: state.dir_bookmarks.clone(),
-            home: home.clone(),
-            nav: nav.clone(),
-            printer: printer.clone(),
-            delta: 1,
-        })),
+        EventHandler::Conditional(Box::new(bind_arrow(NavAxis::Cd, true))),
     );
     rl.bind_sequence(
         KeyEvent(KeyCode::Right, Modifiers::NONE),
-        EventHandler::Conditional(Box::new(PageHandler {
-            history: state.history.clone(),
-            recent_dirs: state.recent_dirs.clone(),
-            bookmarks: state.dir_bookmarks.clone(),
-            home: home.clone(),
-            nav: nav.clone(),
-            printer: printer.clone(),
-            delta: -1,
-        })),
+        EventHandler::Conditional(Box::new(bind_arrow(NavAxis::Cd, false))),
     );
 
     loop {
-        match rl.readline(&state.prompt()) {
+        // Snapshot the nav state for this iteration. If a previous arrow
+        // press left us with `pending_restart`, we use it as `readline`'s
+        // initial buffer and bake the matching `his N` / `cd N` into the
+        // prompt. Otherwise this is a fresh prompt.
+        let (initial, prompt) = match hist_nav.lock() {
+            Ok(mut n) => (n.pending_restart.take(), state.prompt(&n.nav)),
+            Err(_) => (None, state.prompt(&NavState::new())),
+        };
+
+        let result = match initial.as_deref() {
+            Some(text) => {
+                // Wipe the previous prompt line (which still shows the old
+                // `his N` / cwd / input) so the redraw doesn't stack lines
+                // as the user walks through history.
+                print!("\x1b[1A\r\x1b[2K");
+                let _ = io::Write::flush(&mut io::stdout());
+                rl.readline_with_initial(&prompt, (text, ""))
+            }
+            None => rl.readline(&prompt),
+        };
+
+        match result {
             Ok(line) => {
+                if let Ok(mut n) = hist_nav.lock() {
+                    n.reset();
+                }
                 if !line.trim().is_empty() {
                     let _ = rl.add_history_entry(&line);
                 }
@@ -1022,8 +1157,23 @@ fn main() {
                     break;
                 }
             }
-            Err(ReadlineError::Interrupted) => println!("^C"), // Ctrl+C clears line
-            Err(ReadlineError::Eof) => break,                  // Ctrl+D exits
+            Err(ReadlineError::Interrupted) => {
+                // Two cases: (a) Up/Down handler asked us to restart with a
+                // new prompt — pending_restart is set, just loop. (b) Real
+                // Ctrl+C — reset nav and print ^C.
+                let restart = hist_nav
+                    .lock()
+                    .ok()
+                    .map(|n| n.pending_restart.is_some())
+                    .unwrap_or(false);
+                if !restart {
+                    if let Ok(mut n) = hist_nav.lock() {
+                        n.reset();
+                    }
+                    println!("^C");
+                }
+            }
+            Err(ReadlineError::Eof) => break, // Ctrl+D exits
             Err(e) => {
                 eprintln!("Error: {e}");
                 break;
