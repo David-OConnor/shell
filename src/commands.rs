@@ -12,8 +12,7 @@
 //! `logs` is Linux-only because `journalctl` is. On other platforms we
 //! compile a stub that just reports that via the sink.
 
-use std::path::Path;
-use std::process::Command;
+use std::{path::Path, process::Command};
 
 /// Which stream a chunk of output came from. Frontends use this to colour
 /// the line (stderr red, stdout default) and/or pick between stdout/stderr

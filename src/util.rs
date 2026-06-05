@@ -24,7 +24,8 @@ pub fn path_from_args(
     if args.is_empty() || args == "~" {
         // cd with no args (or a bare `~`) goes home; fall back to the
         // current directory if we couldn't resolve a home dir.
-        home.map(|h| h.to_path_buf()).unwrap_or_else(|| cwd.to_path_buf())
+        home.map(|h| h.to_path_buf())
+            .unwrap_or_else(|| cwd.to_path_buf())
     } else if let Some(rest) = args.strip_prefix("~/").or_else(|| args.strip_prefix("~\\")) {
         home.map(|h| h.join(rest)).unwrap_or_else(|| cwd.join(args))
     } else {

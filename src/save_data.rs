@@ -23,6 +23,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+
 use crate::state::{HistoryItem, RecentDir};
 
 pub const FILENAME: &str = "shell_state.ss";
@@ -76,10 +77,7 @@ pub fn save_state(
         // Flatten any newlines so each history entry is one line on disk.
         // (We split on '\t' to recover fields; tabs in user input are rare
         // enough that we just drop them rather than escape.)
-        let text = h
-            .text
-            .replace(['\r', '\n'], " ")
-            .replace('\t', " ");
+        let text = h.text.replace(['\r', '\n'], " ").replace('\t', " ");
         writeln!(
             f,
             "{HISTORY_TAG}{}\t{}\t{}",
@@ -94,9 +92,7 @@ pub fn save_state(
 
 /// Read the persistent state. A missing file is not an error — it just
 /// means no saved state yet, so we return empty vecs.
-pub fn load_state(
-    path: &Path,
-) -> io::Result<(Vec<PathBuf>, Vec<RecentDir>, Vec<HistoryItem>)> {
+pub fn load_state(path: &Path) -> io::Result<(Vec<PathBuf>, Vec<RecentDir>, Vec<HistoryItem>)> {
     let file = match fs::File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {

@@ -59,7 +59,6 @@ Run `logs <service>`, to view the recent Journalctl logs. Linux only. For exampl
 `sudo journalctl -u gunicorn -f` for the gunicorn service.
 
 
-
 ### Typed commands
 - `exit` or `quit`: Exit the program.
 - `sync`: Run `git add .`, `git commit -am <the commit message>`, and `git push`.
@@ -77,7 +76,7 @@ also works on Windows.
 - Enter key: Send input
 - ↑ / ↓: Walk through previously-entered history items (across all directories)
   and load each into the input. Replaces the OS shell's default history
-  behaviour. A green ` his N` indicator next to the prompt shows the current
+  behavior. A green ` his N` indicator next to the prompt shows the current
   item — e.g. `S <cwd> his 29 $ ...`.
 - ← / →: Walk through recent directories. Each step loads `cd <path>` into
   the input and shows a green ` cd N` indicator next to the prompt; Enter
@@ -86,7 +85,6 @@ also works on Windows.
 - Tab key: while using with cd, autocompletes, including to bookmarks.
 
 ### Recent or frequent commands
-``
 - Ctrl + B: Bookmark the current directory.
 - Ctrl + R: List the most recent directories a command has been executed from.
 - Ctrl + H: List the most recent items from history.
