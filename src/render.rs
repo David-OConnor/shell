@@ -9,7 +9,7 @@ use std::{
 use rustyline::highlight::Highlighter;
 use shell::{HistoryItem, NavState, RecentDir};
 
-use crate::{CD_PREFIX, DISP_HIST_LEN, DIVIDER, HIS_PREFIX, ShellHelper};
+use crate::{BRANCH_PREFIX, CD_PREFIX, DISP_HIST_LEN, DIVIDER, HIS_PREFIX, ShellHelper};
 
 // ANSI escape codes. Modern Windows consoles (Windows Terminal, pwsh, post-2019
 // conhost) handle these natively; rustyline enables VT processing on startup.
@@ -145,11 +145,11 @@ pub fn render_bookmarks(bookmarks: &[PathBuf], home: Option<&Path>, page: usize)
 
 impl Highlighter for ShellHelper {
     /// Color the `S` and `$` accents in the prompt yellow, leaving the
-    /// directory in its default terminal color. When the prompt carries a
-    /// recall indicator (` his N` or ` cd N` between the cwd and the `$`),
-    /// that portion is coloured light green. Prompt shape from
-    /// `State::prompt` is `"S <cwd>[ his N][ cd N] $ "` (at most one of
-    /// the two indicators is present at a time — see [NavState]).
+    /// directory in its default terminal color. The prompt may carry a
+    /// ` branch: NAME` segment (magenta) and at most one recall indicator
+    /// (` his N` / ` cd N`, light green) between the cwd and the `$`.
+    /// Prompt shape from `State::prompt` is
+    /// `"S <cwd>[ branch: NAME][ his N][ cd N] $ "`.
     fn highlight_prompt<'b, 's: 'b, 'p: 'b>(
         &'s self,
         prompt: &'p str,
@@ -159,13 +159,12 @@ impl Highlighter for ShellHelper {
             if let Some(dollar_idx) = rest.rfind(" $ ") {
                 let body = &rest[..dollar_idx];
                 let tail = &rest[dollar_idx + 3..]; // usually empty
-                // Pull off the trailing ` his N` / ` cd N` indicator if
-                // present, so we can render it in a different colour from
-                // the dir. Search from the right and prefer whichever
-                // marker is closer to the `$`.
+
+                // Peel off the trailing recall indicator first, then the
+                // branch slot, leaving the bare cwd. Search from the right
+                // on each so a literal "branch:" mid-path can't fool us.
                 let his_at = body.rfind(HIS_PREFIX);
                 let cd_at = body.rfind(CD_PREFIX);
-
                 let indicator_at = match (his_at, cd_at) {
                     (Some(a), Some(b)) => Some(a.max(b)),
                     (Some(a), None) => Some(a),
@@ -173,18 +172,27 @@ impl Highlighter for ShellHelper {
                     (None, None) => None,
                 };
 
-                let (dir, indicator) = match indicator_at {
+                let (before_indicator, indicator) = match indicator_at {
                     Some(i) => (&body[..i], Some(&body[i + 1..])),
                     None => (body, None),
                 };
 
+                let (dir, branch) = match before_indicator.rfind(BRANCH_PREFIX) {
+                    Some(i) => (&before_indicator[..i], Some(&before_indicator[i + 1..])),
+                    None => (before_indicator, None),
+                };
+
+                let branch_part = match branch {
+                    Some(b) => format!(" {COLOR_MAGENTA}{b}{COLOR_RESET}"),
+                    None => String::new(),
+                };
                 let indicator_part = match indicator {
                     Some(ind) => format!(" {COLOR_GREEN}{ind}{COLOR_RESET}"),
                     None => String::new(),
                 };
 
                 return Cow::Owned(format!(
-                    "{COLOR_YELLOW}S{COLOR_RESET} {dir}{indicator_part} {COLOR_YELLOW}${COLOR_RESET} {tail}"
+                    "{COLOR_YELLOW}S{COLOR_RESET} {dir}{branch_part}{indicator_part} {COLOR_YELLOW}${COLOR_RESET} {tail}"
                 ));
             }
         }

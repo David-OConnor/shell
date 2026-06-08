@@ -21,9 +21,9 @@ use rustyline::{
     validate::Validator,
 };
 use shell::{
-    NavState,
+    BrowserFile, NavState, RemoteTerminal, branch_indicator,
     commands::{self, OutKind},
-    get_home, path_from_args, save_data,
+    current_branch, get_home, path_from_args, read_browser_files, save_data,
     state::{HistoryItem, RecentDir},
 };
 
@@ -35,6 +35,9 @@ mod tasks;
 // so a cwd that happens to contain "his" or "cd" mid-path doesn't match.
 const HIS_PREFIX: &str = " his ";
 const CD_PREFIX: &str = " cd ";
+// Re-exported from the shell lib so render.rs and the prompt builder use
+// exactly the same string (`" branch: "`).
+pub use shell::BRANCH_PREFIX;
 
 /// Shared handle to rustyline's `ExternalPrinter`. Key handlers use this to
 /// print messages *above* the in-progress prompt line — going through
@@ -65,16 +68,32 @@ struct State {
     pub dir_bookmarks: Arc<Mutex<Vec<PathBuf>>>,
     /// Paths we've execute commands from. Works in a similar way to bookmarks.
     pub recent_dirs: Arc<Mutex<Vec<RecentDir>>>,
+    pub remote_terminals: Arc<Mutex<Vec<RemoteTerminal>>>,
+    /// In the current dir. Note persistent, unlike some of our other lists.
+    /// Currently unused in this application; TBD. Used in the GUI
+    /// version.
+    pub browser_files: Arc<Mutex<Vec<BrowserFile>>>,
+    /// Cached git branch for `cwd`. `None` when cwd isn't inside a repo.
+    /// Refreshed by `refresh_branch` after every command and after `cd` —
+    /// branch can change behind our back via `git checkout`, so we re-check
+    /// whenever the user has had a chance to mutate repo state.
+    pub branch: Option<String>,
 }
 
 impl Default for State {
     fn default() -> Self {
+        let cwd = env::current_dir().unwrap_or_default();
+        let branch = current_branch(&cwd);
+
         Self {
             home: get_home(),
             history: Arc::new(Mutex::new(Vec::new())),
-            cwd: env::current_dir().unwrap_or_default(),
+            cwd,
             dir_bookmarks: Arc::new(Mutex::new(Vec::new())),
             recent_dirs: Arc::new(Mutex::new(Vec::new())),
+            remote_terminals: Arc::new(Mutex::new(Vec::new())),
+            browser_files: Arc::new(Mutex::new(Vec::new())),
+            branch,
         }
     }
 }
@@ -94,45 +113,79 @@ impl State {
             .unwrap_or(false);
         let star = if bookmarked { "*" } else { "" };
         format!(
-            "S {star}{}{}{} $ ",
+            "S {star}{}{}{}{} $ ",
             self.cwd.display(),
+            branch_indicator(self.branch.as_deref()),
             nav.his_indicator(),
             nav.cd_indicator(),
         )
     }
 
-    /// Persist user-controlled state (bookmarks + recent dirs + history) to
-    /// the given file. Called after every mutation of any of them. Locks in
-    /// the order bookmarks → recent_dirs → history — keep this order
-    /// consistent across all callers to avoid lock-order deadlocks.
+    /// Re-detect the git branch for `cwd`. Called after `cd` (cwd may have
+    /// moved in/out of a repo) and after every command (a `git checkout`
+    /// might have switched branches behind our back).
+    pub fn refresh_branch(&mut self) {
+        self.branch = current_branch(&self.cwd);
+    }
+
+    /// Re-read the directory listing for `cwd` into `browser_files`. The CLI
+    /// itself doesn't expose this listing yet, but the GUI uses the same
+    /// shared helper, so we keep the field populated for parity (and for
+    /// any future CLI-side use). Called after every successful directory
+    /// change (cd / bm / hist-recall) and at startup.
+    pub fn refresh_browser_files(&self) {
+        let files = read_browser_files(&self.cwd);
+        if let Ok(mut list) = self.browser_files.lock() {
+            *list = files;
+        }
+    }
+
+    /// Persist user-controlled state (bookmarks + recent dirs + history +
+    /// remote terminals) to the given file. Called after every mutation of
+    /// any of them. Locks in the order bookmarks → recent_dirs → history →
+    /// remote_terminals — keep this order consistent across all callers to
+    /// avoid lock-order deadlocks.
     pub fn save(&self, path: &Path) -> io::Result<()> {
         let bookmarks = self
             .dir_bookmarks
             .lock()
             .map_err(|_| io::Error::new(io::ErrorKind::Other, "bookmark lock poisoned"))?;
+
         let recent = self
             .recent_dirs
             .lock()
             .map_err(|_| io::Error::new(io::ErrorKind::Other, "recent-dirs lock poisoned"))?;
+
         let history = self
             .history
             .lock()
             .map_err(|_| io::Error::new(io::ErrorKind::Other, "history lock poisoned"))?;
-        save_data::save_state(&bookmarks, &recent, &history, path)
+
+        let remote_terminals = self
+            .remote_terminals
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "remote-terminals lock poisoned"))?;
+
+        save_data::save_state(&bookmarks, &recent, &history, &remote_terminals, path)
     }
 
     /// Restore state from disk, returning a fresh `State` with that data.
     /// A missing file is treated as "no saved state" and yields the default
     /// `State::new()` values (not an error).
     pub fn load(path: &Path) -> io::Result<Self> {
-        let (bookmarks, recent_dirs, history) = save_data::load_state(path)?;
+        let loaded = save_data::load_state(path)?;
+        let cwd = env::current_dir().unwrap_or_default();
+        let branch = current_branch(&cwd);
 
         Ok(Self {
             home: get_home(),
-            history: Arc::new(Mutex::new(history)),
-            cwd: env::current_dir().unwrap_or_default(),
-            dir_bookmarks: Arc::new(Mutex::new(bookmarks)),
-            recent_dirs: Arc::new(Mutex::new(recent_dirs)),
+            history: Arc::new(Mutex::new(loaded.history)),
+            cwd,
+            dir_bookmarks: Arc::new(Mutex::new(loaded.bookmarks)),
+            recent_dirs: Arc::new(Mutex::new(loaded.recent_dirs)),
+            remote_terminals: Arc::new(Mutex::new(loaded.remote_terminals)),
+            browser_files: Arc::new(Mutex::new(Vec::new())),
+            branch,
         })
     }
 }
@@ -261,9 +314,11 @@ impl Helper for ShellHelper {}
 struct BookmarkHandler {
     bookmarks: Arc<Mutex<Vec<PathBuf>>>,
     /// Held so we can write the full state file (bookmarks + recent dirs +
-    /// history) in a single pass when a bookmark is added.
+    /// history + remote terminals) in a single pass when a bookmark is
+    /// added.
     recent_dirs: Arc<Mutex<Vec<RecentDir>>>,
     history: Arc<Mutex<Vec<HistoryItem>>>,
+    remote_terminals: Arc<Mutex<Vec<RemoteTerminal>>>,
     save_path: PathBuf,
     printer: SharedPrinter,
 }
@@ -283,14 +338,21 @@ impl ConditionalEventHandler for BookmarkHandler {
                 } else {
                     let msg = format!("Added a bookmark: {}\n", cwd.display());
                     list.push(cwd);
-                    // Lock recent_dirs and history after bookmarks — same
-                    // order as State::save, so no lock-order conflicts.
+                    // Lock recent_dirs, history, remote_terminals after
+                    // bookmarks — same order as State::save, so no
+                    // lock-order conflicts.
                     if let Ok(recent) = self.recent_dirs.lock() {
                         if let Ok(history) = self.history.lock() {
-                            if let Err(e) =
-                                save_data::save_state(&list, &recent, &history, &self.save_path)
-                            {
-                                eprintln!("warning: failed to save state: {e}");
+                            if let Ok(remote_terminals) = self.remote_terminals.lock() {
+                                if let Err(e) = save_data::save_state(
+                                    &list,
+                                    &recent,
+                                    &history,
+                                    &remote_terminals,
+                                    &self.save_path,
+                                ) {
+                                    eprintln!("warning: failed to save state: {e}");
+                                }
                             }
                         }
                     }
@@ -783,6 +845,7 @@ fn main() {
         eprintln!("warning: failed to load saved state ({e}); starting fresh");
         State::default()
     });
+    state.refresh_browser_files();
 
     // Editor gives us: line editing, arrow-key history, Ctrl+A/E/K/W, etc.
     // We pair it with a custom Helper so Tab completes bookmark paths after
@@ -825,6 +888,7 @@ fn main() {
             bookmarks: state.dir_bookmarks.clone(),
             recent_dirs: state.recent_dirs.clone(),
             history: state.history.clone(),
+            remote_terminals: state.remote_terminals.clone(),
             save_path: state_path.clone(),
             printer: printer.clone(),
         })),
@@ -933,6 +997,11 @@ fn main() {
                 if !run_command(&mut state, &state_path, &line) {
                     break;
                 }
+                // The command may have changed our cwd (cd) or the current
+                // branch (`git checkout`); re-detect so the next prompt is
+                // accurate.
+                state.refresh_branch();
+                state.refresh_browser_files();
             }
             Err(ReadlineError::Interrupted) => {
                 // Two cases: (a) Up/Down handler asked us to restart with a

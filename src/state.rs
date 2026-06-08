@@ -16,6 +16,23 @@ pub struct RecentDir {
     pub dt: DateTime<Utc>,
 }
 
+/// todo: Determine if you want this, or can use PathBuf directly. This may have
+/// todo advantages for cacheing data for the GUI.
+pub struct BrowserFile {
+    pub path: PathBuf,
+    pub disp_name: String,
+    pub is_folder: bool,
+    pub is_executable: bool,
+}
+
+/// E.g. for SSH
+pub struct RemoteTerminal {
+    pub host: String,
+    pub port: u16, // todo: A/R
+    pub username: String,
+    pub password: String, // todo: Determine how to handle this
+}
+
 /// Arrow-key recall state shared by the CLI and GUI. Tracks two independent
 /// axes that both load text into the input box:
 ///   * `his_cursor` — Up/Down walks `state.history` (all dirs).

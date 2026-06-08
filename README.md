@@ -35,9 +35,9 @@ Saving bookmarks
 Type `cd`, then a few characters from the folder name, then press tab to complete the bookmark.
 
 
-### Autocomplete 
+## Autocomplete 
 
-### Git assistance
+## Git assistance
 Run `sync` followed by a commit message in quote. Quotes are optional. This runs the following:
   - `git add .`
   - `git commit -am <the commit message>`
@@ -50,9 +50,12 @@ sync "A commit message"
 
 sync A commit message
 ```
-
-
 Warning: This isn't suitable for all workflows. If you use git in a way where it isn't appropriate to sync all gitignored files, this may have unintended consequences!
+
+
+Shell will display the current git branch in the input terminal, if in a directory which hosts
+a git repo.
+
 
 ### Linux: JournalCtl logs:
 Run `logs <service>`, to view the recent Journalctl logs. Linux only. For example, this runs:

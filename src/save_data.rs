@@ -1,20 +1,27 @@
 //! Persistent application state. Currently the user's bookmark list plus
-//! the recent-directories list and command history, but the file format is
-//! line-based and tagged so we can add more record types later without
-//! breaking existing files.
+//! the recent-directories list, command history, and saved remote
+//! terminals, but the file format is line-based and tagged so we can add
+//! more record types later without breaking existing files.
 //!
 //! Format:
 //!   # comments and blank lines are ignored
 //!   BOOKMARK <absolute path>
 //!   RECENT_DIR <rfc3339 timestamp> <absolute path>
 //!   HISTORY <rfc3339 timestamp>\t<absolute path>\t<command text>
+//!   REMOTE_TERMINAL <host>\t<port>\t<username>\t<password>
 //!
-//! HISTORY uses TAB as a field separator (rather than space like RECENT_DIR)
-//! because the command text can contain spaces. Newlines in the command text
-//! are flattened to spaces on save so each entry stays on one line.
+//! HISTORY and REMOTE_TERMINAL use TAB as a field separator (rather than
+//! space like RECENT_DIR) because the trailing fields can contain spaces.
+//! Newlines in the command text are flattened to spaces on save so each
+//! entry stays on one line.
 //!
 //! Unknown record types are silently skipped on load so older builds reading
 //! a file written by a newer build don't choke.
+//!
+//! Both the CLI and GUI crates call into this module with plain slices /
+//! `Vec`s — neither one re-implements the parsing or formatting. The CLI
+//! locks its `Arc<Mutex<_>>`s before calling in; the GUI passes its owned
+//! `Vec`s directly.
 
 use std::{
     fs,
@@ -24,13 +31,24 @@ use std::{
 
 use chrono::{DateTime, Utc};
 
-use crate::state::{HistoryItem, RecentDir};
+use crate::state::{HistoryItem, RecentDir, RemoteTerminal};
 
 pub const FILENAME: &str = "shell_state.ss";
 
 const BOOKMARK_TAG: &str = "BOOKMARK ";
 const RECENT_DIR_TAG: &str = "RECENT_DIR ";
 const HISTORY_TAG: &str = "HISTORY ";
+const REMOTE_TERMINAL_TAG: &str = "REMOTE_TERMINAL ";
+
+/// Bundle of everything `load_state` returns. Lets callers destructure
+/// in one step and lets us grow the format without churning every call
+/// site.
+pub struct LoadedState {
+    pub bookmarks: Vec<PathBuf>,
+    pub recent_dirs: Vec<RecentDir>,
+    pub history: Vec<HistoryItem>,
+    pub remote_terminals: Vec<RemoteTerminal>,
+}
 
 /// Where the state file lives by default: `<home>/shell_state.ss`. Falls back
 /// to `None` if neither `USERPROFILE` nor `HOME` is set (rare).
@@ -40,12 +58,13 @@ pub fn default_path() -> Option<PathBuf> {
         .map(|h| PathBuf::from(h).join(FILENAME))
 }
 
-/// Overwrite the state file with the given bookmark, recent-dir, and history
-/// lists. Creates parent directories as needed.
+/// Overwrite the state file with the given bookmark, recent-dir, history,
+/// and remote-terminal lists. Creates parent directories as needed.
 pub fn save_state(
     bookmarks: &[PathBuf],
     recent_dirs: &[RecentDir],
     history: &[HistoryItem],
+    remote_terminals: &[RemoteTerminal],
     path: &Path,
 ) -> io::Result<()> {
     if let Some(parent) = path.parent() {
@@ -63,6 +82,7 @@ pub fn save_state(
     for bm in bookmarks {
         writeln!(f, "{BOOKMARK_TAG}{}", bm.display())?;
     }
+
     for r in recent_dirs {
         // "<rfc3339> <path>" — rfc3339 has no spaces, so the path can be the
         // (possibly space-containing) tail.
@@ -73,6 +93,7 @@ pub fn save_state(
             r.path.display()
         )?;
     }
+
     for h in history {
         // Flatten any newlines so each history entry is one line on disk.
         // (We split on '\t' to recover fields; tabs in user input are rare
@@ -87,16 +108,40 @@ pub fn save_state(
         )?;
     }
 
+    for rt in remote_terminals {
+        // todo: Storing the password in cleartext alongside the rest of
+        // todo: the state file is obviously not OK long-term — revisit
+        // todo: once we settle on an OS keyring / encryption approach.
+        let host = sanitize_field(&rt.host);
+        let username = sanitize_field(&rt.username);
+        let password = sanitize_field(&rt.password);
+        writeln!(
+            f,
+            "{REMOTE_TERMINAL_TAG}{}\t{}\t{}\t{}",
+            host, rt.port, username, password
+        )?;
+    }
+
     Ok(())
+}
+
+/// Flatten characters that would break the line/tab-based record format.
+fn sanitize_field(s: &str) -> String {
+    s.replace(['\r', '\n', '\t'], " ")
 }
 
 /// Read the persistent state. A missing file is not an error — it just
 /// means no saved state yet, so we return empty vecs.
-pub fn load_state(path: &Path) -> io::Result<(Vec<PathBuf>, Vec<RecentDir>, Vec<HistoryItem>)> {
+pub fn load_state(path: &Path) -> io::Result<LoadedState> {
     let file = match fs::File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Ok((Vec::new(), Vec::new(), Vec::new()));
+            return Ok(LoadedState {
+                bookmarks: Vec::new(),
+                recent_dirs: Vec::new(),
+                history: Vec::new(),
+                remote_terminals: Vec::new(),
+            });
         }
         Err(e) => return Err(e),
     };
@@ -104,6 +149,7 @@ pub fn load_state(path: &Path) -> io::Result<(Vec<PathBuf>, Vec<RecentDir>, Vec<
     let mut bookmarks = Vec::new();
     let mut recent_dirs = Vec::new();
     let mut history = Vec::new();
+    let mut remote_terminals = Vec::new();
 
     for line in BufReader::new(file).lines() {
         let line = line?;
@@ -152,7 +198,29 @@ pub fn load_state(path: &Path) -> io::Result<(Vec<PathBuf>, Vec<RecentDir>, Vec<
             }
             continue;
         }
+        if let Some(rest) = trimmed.strip_prefix(REMOTE_TERMINAL_TAG) {
+            let rest = rest.trim_end_matches('\r');
+            let mut parts = rest.splitn(4, '\t');
+            if let (Some(host), Some(port_str), Some(username), Some(password)) =
+                (parts.next(), parts.next(), parts.next(), parts.next())
+            {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    remote_terminals.push(RemoteTerminal {
+                        host: host.to_string(),
+                        port,
+                        username: username.to_string(),
+                        password: password.to_string(),
+                    });
+                }
+            }
+            continue;
+        }
         // Unknown tags are ignored on purpose for forward compatibility.
     }
-    Ok((bookmarks, recent_dirs, history))
+    Ok(LoadedState {
+        bookmarks,
+        recent_dirs,
+        history,
+        remote_terminals,
+    })
 }
