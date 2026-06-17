@@ -9,6 +9,7 @@
 //!   RECENT_DIR <rfc3339 timestamp> <absolute path>
 //!   HISTORY <rfc3339 timestamp>\t<absolute path>\t<command text>
 //!   REMOTE_TERMINAL <host>\t<port>\t<username>\t<password>
+//!   PANEL_VIS <key>=<0|1> <key>=<0|1> ...
 //!
 //! HISTORY and REMOTE_TERMINAL use TAB as a field separator (rather than
 //! space like RECENT_DIR) because the trailing fields can contain spaces.
@@ -31,7 +32,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 
-use crate::state::{HistoryItem, RecentDir, RemoteTerminal};
+use crate::state::{HistoryItem, PanelVis, RecentDir, RemoteTerminal};
 
 pub const FILENAME: &str = "shell_state.ss";
 
@@ -39,6 +40,7 @@ const BOOKMARK_TAG: &str = "BOOKMARK ";
 const RECENT_DIR_TAG: &str = "RECENT_DIR ";
 const HISTORY_TAG: &str = "HISTORY ";
 const REMOTE_TERMINAL_TAG: &str = "REMOTE_TERMINAL ";
+const PANEL_VIS_TAG: &str = "PANEL_VIS ";
 
 /// Bundle of everything `load_state` returns. Lets callers destructure
 /// in one step and lets us grow the format without churning every call
@@ -48,6 +50,7 @@ pub struct LoadedState {
     pub recent_dirs: Vec<RecentDir>,
     pub history: Vec<HistoryItem>,
     pub remote_terminals: Vec<RemoteTerminal>,
+    pub panel_vis: PanelVis,
 }
 
 /// Where the state file lives by default: `<home>/shell_state.ss`. Falls back
@@ -65,6 +68,7 @@ pub fn save_state(
     recent_dirs: &[RecentDir],
     history: &[HistoryItem],
     remote_terminals: &[RemoteTerminal],
+    panel_vis: &PanelVis,
     path: &Path,
 ) -> io::Result<()> {
     if let Some(parent) = path.parent() {
@@ -108,6 +112,20 @@ pub fn save_state(
         )?;
     }
 
+    // PanelVis: one line, space-separated `key=0|1` pairs. Stable order
+    // so the file diff is reproducible. Forward-compatible: unknown keys
+    // are skipped on load; missing keys keep their default value.
+    writeln!(
+        f,
+        "{PANEL_VIS_TAG}bookmarks={} recent_dirs={} recent_cmds={} recent_cmds_in_dir={} remote_terminals={} file_browser={}",
+        bool_to_int(panel_vis.bookmarks),
+        bool_to_int(panel_vis.recent_dirs),
+        bool_to_int(panel_vis.recent_cmds),
+        bool_to_int(panel_vis.recent_cmds_in_dir),
+        bool_to_int(panel_vis.remote_terminals),
+        bool_to_int(panel_vis.file_browser),
+    )?;
+
     for rt in remote_terminals {
         // todo: Storing the password in cleartext alongside the rest of
         // todo: the state file is obviously not OK long-term — revisit
@@ -130,6 +148,10 @@ fn sanitize_field(s: &str) -> String {
     s.replace(['\r', '\n', '\t'], " ")
 }
 
+fn bool_to_int(b: bool) -> u8 {
+    if b { 1 } else { 0 }
+}
+
 /// Read the persistent state. A missing file is not an error — it just
 /// means no saved state yet, so we return empty vecs.
 pub fn load_state(path: &Path) -> io::Result<LoadedState> {
@@ -141,6 +163,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
                 recent_dirs: Vec::new(),
                 history: Vec::new(),
                 remote_terminals: Vec::new(),
+                panel_vis: PanelVis::default(),
             });
         }
         Err(e) => return Err(e),
@@ -150,6 +173,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
     let mut recent_dirs = Vec::new();
     let mut history = Vec::new();
     let mut remote_terminals = Vec::new();
+    let mut panel_vis = PanelVis::default();
 
     for line in BufReader::new(file).lines() {
         let line = line?;
@@ -198,6 +222,27 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
             }
             continue;
         }
+        if let Some(rest) = trimmed.strip_prefix(PANEL_VIS_TAG) {
+            // Parse `key=val key=val ...`. Unknown keys are ignored;
+            // missing keys keep their default. A malformed value just
+            // leaves that field at its default.
+            for pair in rest.trim_end().split_whitespace() {
+                let Some((k, v)) = pair.split_once('=') else {
+                    continue;
+                };
+                let on = v == "1" || v.eq_ignore_ascii_case("true");
+                match k {
+                    "bookmarks" => panel_vis.bookmarks = on,
+                    "recent_dirs" => panel_vis.recent_dirs = on,
+                    "recent_cmds" => panel_vis.recent_cmds = on,
+                    "recent_cmds_in_dir" => panel_vis.recent_cmds_in_dir = on,
+                    "remote_terminals" => panel_vis.remote_terminals = on,
+                    "file_browser" => panel_vis.file_browser = on,
+                    _ => {}
+                }
+            }
+            continue;
+        }
         if let Some(rest) = trimmed.strip_prefix(REMOTE_TERMINAL_TAG) {
             let rest = rest.trim_end_matches('\r');
             let mut parts = rest.splitn(4, '\t');
@@ -222,5 +267,6 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
         recent_dirs,
         history,
         remote_terminals,
+        panel_vis,
     })
 }

@@ -21,9 +21,9 @@ use rustyline::{
     validate::Validator,
 };
 use shell::{
-    BrowserFile, NavState, RemoteTerminal, branch_indicator,
+    BrowserFile, NavState, PanelVis, RemoteTerminal, branch_indicator,
     commands::{self, OutKind},
-    current_branch, get_home, path_from_args, read_browser_files, save_data,
+    complete_cd_path, current_branch, get_home, path_from_args, read_browser_files, save_data,
     state::{HistoryItem, RecentDir},
 };
 
@@ -73,6 +73,10 @@ struct State {
     /// Currently unused in this application; TBD. Used in the GUI
     /// version.
     pub browser_files: Arc<Mutex<Vec<BrowserFile>>>,
+    /// GUI panel-visibility settings. The CLI doesn't read these — they're
+    /// here purely so a CLI-side save round-trips the GUI's layout choice
+    /// instead of clobbering it back to defaults.
+    pub panel_vis: PanelVis,
     /// Cached git branch for `cwd`. `None` when cwd isn't inside a repo.
     /// Refreshed by `refresh_branch` after every command and after `cd` —
     /// branch can change behind our back via `git checkout`, so we re-check
@@ -93,6 +97,7 @@ impl Default for State {
             recent_dirs: Arc::new(Mutex::new(Vec::new())),
             remote_terminals: Arc::new(Mutex::new(Vec::new())),
             browser_files: Arc::new(Mutex::new(Vec::new())),
+            panel_vis: PanelVis::default(),
             branch,
         }
     }
@@ -166,7 +171,14 @@ impl State {
             .lock()
             .map_err(|_| io::Error::new(io::ErrorKind::Other, "remote-terminals lock poisoned"))?;
 
-        save_data::save_state(&bookmarks, &recent, &history, &remote_terminals, path)
+        save_data::save_state(
+            &bookmarks,
+            &recent,
+            &history,
+            &remote_terminals,
+            &self.panel_vis,
+            path,
+        )
     }
 
     /// Restore state from disk, returning a fresh `State` with that data.
@@ -185,27 +197,21 @@ impl State {
             recent_dirs: Arc::new(Mutex::new(loaded.recent_dirs)),
             remote_terminals: Arc::new(Mutex::new(loaded.remote_terminals)),
             browser_files: Arc::new(Mutex::new(Vec::new())),
+            panel_vis: loaded.panel_vis,
             branch,
         })
     }
 }
 
 /// Rustyline `Helper` that provides Tab-completion for the `cd` builtin
-/// against the user's bookmark list. Matches case-insensitively against the
-/// last path component of each bookmark, and replaces the partial argument
-/// with the full path (formatted as `~/...` when under the home dir).
+/// through the shared bookmark + filesystem completer. Other commands fall
+/// back to rustyline's built-in filename completer.
 struct ShellHelper {
     bookmarks: Arc<Mutex<Vec<PathBuf>>>,
     home: Option<PathBuf>,
     /// Rustyline's built-in filename completer, used as the fallback when no
     /// bookmark matches (and for non-`cd` commands).
     fs_completer: FilenameCompleter,
-}
-
-impl ShellHelper {
-    fn render(&self, p: &Path) -> String {
-        render::render_with_tilde(p, self.home.as_deref())
-    }
 }
 
 impl Completer for ShellHelper {
@@ -217,43 +223,28 @@ impl Completer for ShellHelper {
         pos: usize,
         ctx: &Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
-        let before = &line[..pos];
-        let trimmed = before.trim_start();
-        let leading = before.len() - trimmed.len();
-
-        // If the command word is `cd`, try bookmark completion first.
-        if let Some(i) = trimmed.find(char::is_whitespace) {
-            let cmd_part = &trimmed[..i];
-            let rest = &trimmed[i..];
-            if cmd_part == "cd" {
-                let arg = rest.trim_start();
-                let arg_start = leading + (trimmed.len() - arg.len());
-                let needle = arg.to_lowercase();
-
-                let bookmark_pairs: Vec<Pair> = match self.bookmarks.lock() {
-                    Ok(list) => list
-                        .iter()
-                        .filter_map(|p| {
-                            let name = p.file_name()?.to_str()?;
-                            if name.to_lowercase().starts_with(&needle) {
-                                Some(Pair {
-                                    display: name.to_string(),
-                                    replacement: self.render(p),
-                                })
-                            } else {
-                                None
-                            }
+        // If the command word is `cd`, use the shared bookmark + filesystem
+        // path completer so nested args like `code/Bi` resolve correctly.
+        let bookmarks = self.bookmarks.lock();
+        let bookmark_slice: &[PathBuf] = bookmarks.as_deref().map(|v| v.as_slice()).unwrap_or(&[]);
+        if let Ok(cwd) = env::current_dir() {
+            if let Some(result) =
+                complete_cd_path(line, pos, &cwd, self.home.as_deref(), bookmark_slice)
+            {
+                if !result.candidates.is_empty() {
+                    let pairs = result
+                        .candidates
+                        .into_iter()
+                        .map(|candidate| Pair {
+                            display: candidate.display,
+                            replacement: candidate.replacement,
                         })
-                        .collect(),
-                    Err(_) => Vec::new(),
-                };
-
-                if !bookmark_pairs.is_empty() {
-                    return Ok((arg_start, bookmark_pairs));
+                        .collect();
+                    return Ok((result.start, pairs));
                 }
-                // No bookmark match — fall through to filesystem completion.
             }
         }
+        drop(bookmarks);
 
         // Default: complete files & directories in the CWD (bash-style).
         self.fs_completer.complete(line, pos, ctx)
@@ -319,6 +310,10 @@ struct BookmarkHandler {
     recent_dirs: Arc<Mutex<Vec<RecentDir>>>,
     history: Arc<Mutex<Vec<HistoryItem>>>,
     remote_terminals: Arc<Mutex<Vec<RemoteTerminal>>>,
+    /// Snapshot of `panel_vis` taken at handler construction. The CLI
+    /// never mutates this field, so the snapshot is always current and
+    /// we just write it back unchanged to preserve GUI settings.
+    panel_vis: PanelVis,
     save_path: PathBuf,
     printer: SharedPrinter,
 }
@@ -349,6 +344,7 @@ impl ConditionalEventHandler for BookmarkHandler {
                                     &recent,
                                     &history,
                                     &remote_terminals,
+                                    &self.panel_vis,
                                     &self.save_path,
                                 ) {
                                     eprintln!("warning: failed to save state: {e}");
@@ -889,6 +885,7 @@ fn main() {
             recent_dirs: state.recent_dirs.clone(),
             history: state.history.clone(),
             remote_terminals: state.remote_terminals.clone(),
+            panel_vis: state.panel_vis,
             save_path: state_path.clone(),
             printer: printer.clone(),
         })),

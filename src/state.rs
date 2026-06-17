@@ -33,6 +33,34 @@ pub struct RemoteTerminal {
     pub password: String, // todo: Determine how to handle this
 }
 
+/// Which optional side panels in the GUI are currently visible. Lives in
+/// the shared lib so the CLI can round-trip it through the save file
+/// without understanding what each panel does — the user's preferred
+/// layout sticks across runs even if CLI and GUI usage are interleaved.
+/// Each field is `true` for visible, `false` for hidden.
+#[derive(Clone, Copy, Debug)]
+pub struct PanelVis {
+    pub bookmarks: bool,
+    pub recent_dirs: bool,
+    pub recent_cmds: bool,
+    pub recent_cmds_in_dir: bool,
+    pub remote_terminals: bool,
+    pub file_browser: bool,
+}
+
+impl Default for PanelVis {
+    fn default() -> Self {
+        Self {
+            bookmarks: true,
+            recent_dirs: true,
+            recent_cmds: true,
+            recent_cmds_in_dir: true,
+            remote_terminals: false,
+            file_browser: true,
+        }
+    }
+}
+
 /// Arrow-key recall state shared by the CLI and GUI. Tracks two independent
 /// axes that both load text into the input box:
 ///   * `his_cursor` — Up/Down walks `state.history` (all dirs).

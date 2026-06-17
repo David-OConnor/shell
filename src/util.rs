@@ -8,6 +8,18 @@ use std::{
 
 use crate::state::BrowserFile;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompletionCandidate {
+    pub display: String,
+    pub replacement: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompletionResult {
+    pub start: usize,
+    pub candidates: Vec<CompletionCandidate>,
+}
+
 /// Resolve a `cd`/`cat`-style path argument against the shell's state:
 /// expands `~`/`~/...` to the home dir, treats real paths literally, and
 /// falls back to a case-insensitive prefix match against bookmarked
@@ -53,6 +65,253 @@ pub fn path_from_args(
                 .cloned()
                 .unwrap_or(literal)
         }
+    }
+}
+
+/// Render a path as `~/relative` when it lives under the home directory;
+/// otherwise use the absolute form. Uses forward slashes after the tilde for
+/// consistency with the rest of the shell.
+pub fn render_with_tilde(p: &Path, home: Option<&Path>) -> String {
+    if let Some(home) = home {
+        if let Ok(rest) = p.strip_prefix(home) {
+            let rest_str = rest.to_string_lossy().replace('\\', "/");
+            if rest_str.is_empty() {
+                return "~".to_string();
+            }
+            return format!("~/{}", rest_str);
+        }
+    }
+    p.display().to_string()
+}
+
+/// Shared `cd` autocomplete used by both the CLI and GUI frontends. It
+/// completes bookmarked directory names first, then falls back to directory
+/// entries on disk, including nested relative paths like `code/Bi`.
+pub fn complete_cd_path(
+    line: &str,
+    pos: usize,
+    cwd: &Path,
+    home: Option<&Path>,
+    bookmarks: &[PathBuf],
+) -> Option<CompletionResult> {
+    if pos > line.len() || !line.is_char_boundary(pos) {
+        return None;
+    }
+
+    let before = &line[..pos];
+    let trimmed = before.trim_start();
+    let leading = before.len() - trimmed.len();
+
+    let i = trimmed.find(char::is_whitespace)?;
+    let cmd_part = &trimmed[..i];
+    if cmd_part != "cd" {
+        return None;
+    }
+
+    let rest = &trimmed[i..];
+    let arg = rest.trim_start();
+    let arg_start = leading + (trimmed.len() - arg.len());
+
+    let mut candidates = complete_bookmarks(arg, home, bookmarks);
+    if candidates.is_empty() {
+        candidates = complete_dirs(arg, cwd, home);
+    }
+
+    Some(CompletionResult {
+        start: arg_start,
+        candidates,
+    })
+}
+
+/// Apply a completion to an input line, using the sole candidate when there
+/// is one or the shared prefix of multiple candidates when possible.
+pub fn apply_completion(line: &str, pos: usize, completion: &CompletionResult) -> Option<String> {
+    if completion.candidates.is_empty()
+        || completion.start > pos
+        || pos > line.len()
+        || !line.is_char_boundary(pos)
+        || !line.is_char_boundary(completion.start)
+    {
+        return None;
+    }
+
+    let mut replacement = completion.candidates[0].replacement.clone();
+    for candidate in completion.candidates.iter().skip(1) {
+        truncate_to_common_prefix(&mut replacement, &candidate.replacement);
+    }
+
+    if replacement == line[completion.start..pos] {
+        return None;
+    }
+
+    let mut out = line.to_string();
+    out.replace_range(completion.start..pos, &replacement);
+    Some(out)
+}
+
+fn complete_bookmarks(
+    arg: &str,
+    home: Option<&Path>,
+    bookmarks: &[PathBuf],
+) -> Vec<CompletionCandidate> {
+    let needle = arg.to_lowercase();
+    bookmarks
+        .iter()
+        .filter_map(|p| {
+            let name = p.file_name()?.to_str()?;
+            if name.to_lowercase().starts_with(&needle) {
+                Some(CompletionCandidate {
+                    display: name.to_string(),
+                    replacement: render_with_tilde(p, home),
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn complete_dirs(arg: &str, cwd: &Path, home: Option<&Path>) -> Vec<CompletionCandidate> {
+    let (dir_prefix, base_dir, leaf_prefix) = completion_base(arg, cwd, home);
+    let entries = match fs::read_dir(base_dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+    let leaf_prefix = leaf_prefix.to_lowercase();
+
+    let mut candidates: Vec<CompletionCandidate> = entries
+        .flatten()
+        .filter_map(|entry| {
+            if !entry.file_type().ok()?.is_dir() {
+                return None;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.to_lowercase().starts_with(&leaf_prefix) {
+                Some(CompletionCandidate {
+                    display: name.clone(),
+                    replacement: format!("{dir_prefix}{name}"),
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    candidates.sort_by(|a, b| a.display.to_lowercase().cmp(&b.display.to_lowercase()));
+    candidates
+}
+
+fn completion_base<'a>(
+    arg: &'a str,
+    cwd: &Path,
+    home: Option<&Path>,
+) -> (String, PathBuf, &'a str) {
+    let Some(sep_idx) = arg.rfind(['/', '\\']) else {
+        return (String::new(), cwd.to_path_buf(), arg);
+    };
+
+    let dir_prefix = &arg[..=sep_idx];
+    let base_arg = if sep_idx == 0 || arg.as_bytes().get(sep_idx.wrapping_sub(1)) == Some(&b':') {
+        dir_prefix
+    } else {
+        &arg[..sep_idx]
+    };
+    let leaf_prefix = &arg[sep_idx + 1..];
+
+    let base_dir = if base_arg == "~/" || base_arg == "~\\" {
+        home.map(Path::to_path_buf)
+            .unwrap_or_else(|| cwd.join(base_arg))
+    } else if let Some(rest) = base_arg
+        .strip_prefix("~/")
+        .or_else(|| base_arg.strip_prefix("~\\"))
+    {
+        home.map(|h| h.join(rest))
+            .unwrap_or_else(|| cwd.join(base_arg))
+    } else {
+        let p = Path::new(base_arg);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            cwd.join(p)
+        }
+    };
+
+    (dir_prefix.to_string(), base_dir, leaf_prefix)
+}
+
+fn truncate_to_common_prefix(a: &mut String, b: &str) {
+    let mut end = 0;
+    for ((a_idx, a_ch), (_, b_ch)) in a.char_indices().zip(b.char_indices()) {
+        if a_ch != b_ch {
+            break;
+        }
+        end = a_idx + a_ch.len_utf8();
+    }
+    a.truncate(end);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    fn test_root(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        env::temp_dir().join(format!("shell_{name}_{}_{}", std::process::id(), stamp))
+    }
+
+    #[test]
+    fn cd_completion_jumps_into_nested_relative_dir() {
+        let root = test_root("nested_relative");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("code").join("Bio")).unwrap();
+
+        let line = "cd code/Bi";
+        let result = complete_cd_path(line, line.len(), &root, None, &[]).unwrap();
+
+        assert_eq!(result.start, 3);
+        assert_eq!(
+            result.candidates,
+            vec![CompletionCandidate {
+                display: "Bio".to_string(),
+                replacement: "code/Bio".to_string(),
+            }]
+        );
+        assert_eq!(
+            apply_completion(line, line.len(), &result),
+            Some("cd code/Bio".to_string())
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cd_completion_jumps_into_nested_home_relative_dir() {
+        let root = test_root("nested_home");
+        let home = root.join("home");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(home.join("code").join("Bio")).unwrap();
+
+        let line = "cd ~/code/Bi";
+        let result = complete_cd_path(line, line.len(), &root, Some(&home), &[]).unwrap();
+
+        assert_eq!(
+            result.candidates,
+            vec![CompletionCandidate {
+                display: "Bio".to_string(),
+                replacement: "~/code/Bio".to_string(),
+            }]
+        );
+        assert_eq!(
+            apply_completion(line, line.len(), &result),
+            Some("cd ~/code/Bio".to_string())
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 }
 
