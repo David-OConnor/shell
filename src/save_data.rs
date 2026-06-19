@@ -10,6 +10,9 @@
 //!   HISTORY <rfc3339 timestamp>\t<absolute path>\t<command text>
 //!   REMOTE_TERMINAL <host>\t<port>\t<username>\t<password>
 //!   PANEL_VIS <key>=<0|1> <key>=<0|1> ...
+//!   WINDOW_SIZE x=<width> y=<height>
+//!   OPEN_TAB <absolute path>
+//!   ACTIVE_TAB <index>
 //!
 //! HISTORY and REMOTE_TERMINAL use TAB as a field separator (rather than
 //! space like RECENT_DIR) because the trailing fields can contain spaces.
@@ -32,7 +35,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 
-use crate::state::{HistoryItem, PanelVis, RecentDir, RemoteTerminal};
+use crate::state::{HistoryItem, OpenTabs, PanelVis, RecentDir, RemoteTerminal, WindowSize};
 
 pub const FILENAME: &str = "shell_state.ss";
 
@@ -41,6 +44,9 @@ const RECENT_DIR_TAG: &str = "RECENT_DIR ";
 const HISTORY_TAG: &str = "HISTORY ";
 const REMOTE_TERMINAL_TAG: &str = "REMOTE_TERMINAL ";
 const PANEL_VIS_TAG: &str = "PANEL_VIS ";
+const WINDOW_SIZE_TAG: &str = "WINDOW_SIZE ";
+const OPEN_TAB_TAG: &str = "OPEN_TAB ";
+const ACTIVE_TAB_TAG: &str = "ACTIVE_TAB ";
 
 /// Bundle of everything `load_state` returns. Lets callers destructure
 /// in one step and lets us grow the format without churning every call
@@ -51,6 +57,14 @@ pub struct LoadedState {
     pub history: Vec<HistoryItem>,
     pub remote_terminals: Vec<RemoteTerminal>,
     pub panel_vis: PanelVis,
+    /// `None` when the file has no `WINDOW_SIZE` line (e.g. it predates the
+    /// feature, or was last written by a CLI-only session that never had a
+    /// size to record). The GUI falls back to its default size in that case.
+    pub window_size: Option<WindowSize>,
+    /// The GUI tabs that were open when the file was last written. `paths`
+    /// is empty when the file has no `OPEN_TAB` lines (predates the feature
+    /// or a CLI-only file), in which case the GUI opens a single default tab.
+    pub open_tabs: OpenTabs,
 }
 
 /// Where the state file lives by default: `<home>/shell_state.ss`. Falls back
@@ -69,6 +83,8 @@ pub fn save_state(
     history: &[HistoryItem],
     remote_terminals: &[RemoteTerminal],
     panel_vis: &PanelVis,
+    window_size: Option<WindowSize>,
+    open_tabs: &OpenTabs,
     path: &Path,
 ) -> io::Result<()> {
     if let Some(parent) = path.parent() {
@@ -126,6 +142,24 @@ pub fn save_state(
         bool_to_int(panel_vis.file_browser),
     )?;
 
+    // WindowSize: GUI-only. Written only when present so a CLI-side save
+    // (which passes `None`) preserves whatever the GUI last recorded rather
+    // than clobbering or zeroing it.
+    if let Some(ws) = window_size {
+        writeln!(f, "{WINDOW_SIZE_TAG}x={} y={}", ws.x, ws.y)?;
+    }
+
+    // OpenTabs: GUI-only. One `OPEN_TAB <path>` line per tab in tab order,
+    // followed by a single `ACTIVE_TAB <index>`. Written only when there's at
+    // least one tab so a CLI-side save (which round-trips an empty `OpenTabs`)
+    // doesn't emit a meaningless `ACTIVE_TAB 0` with no tabs.
+    if !open_tabs.paths.is_empty() {
+        for path in &open_tabs.paths {
+            writeln!(f, "{OPEN_TAB_TAG}{}", path.display())?;
+        }
+        writeln!(f, "{ACTIVE_TAB_TAG}{}", open_tabs.active)?;
+    }
+
     for rt in remote_terminals {
         // todo: Storing the password in cleartext alongside the rest of
         // todo: the state file is obviously not OK long-term — revisit
@@ -164,6 +198,8 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
                 history: Vec::new(),
                 remote_terminals: Vec::new(),
                 panel_vis: PanelVis::default(),
+                window_size: None,
+                open_tabs: OpenTabs::default(),
             });
         }
         Err(e) => return Err(e),
@@ -174,6 +210,8 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
     let mut history = Vec::new();
     let mut remote_terminals = Vec::new();
     let mut panel_vis = PanelVis::default();
+    let mut window_size = None;
+    let mut open_tabs = OpenTabs::default();
 
     for line in BufReader::new(file).lines() {
         let line = line?;
@@ -243,6 +281,41 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
             }
             continue;
         }
+        if let Some(rest) = trimmed.strip_prefix(WINDOW_SIZE_TAG) {
+            // Parse `x=<width> y=<height>`. Only adopt the line when both
+            // dimensions parse as positive, finite numbers — a malformed or
+            // degenerate entry leaves `window_size` at `None` so the GUI
+            // uses its default rather than opening a zero-size window.
+            let (mut x, mut y) = (None, None);
+            for pair in rest.trim_end().split_whitespace() {
+                let Some((k, v)) = pair.split_once('=') else {
+                    continue;
+                };
+                match k {
+                    "x" => x = v.parse::<f32>().ok(),
+                    "y" => y = v.parse::<f32>().ok(),
+                    _ => {}
+                }
+            }
+            if let (Some(x), Some(y)) = (x, y) {
+                if x.is_finite() && y.is_finite() && x > 0.0 && y > 0.0 {
+                    window_size = Some(WindowSize { x, y });
+                }
+            }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix(OPEN_TAB_TAG) {
+            open_tabs.paths.push(PathBuf::from(rest.trim_end()));
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix(ACTIVE_TAB_TAG) {
+            // A malformed index just leaves `active` at its default of 0; the
+            // GUI clamps it to a valid tab in any case.
+            if let Ok(idx) = rest.trim_end().parse::<usize>() {
+                open_tabs.active = idx;
+            }
+            continue;
+        }
         if let Some(rest) = trimmed.strip_prefix(REMOTE_TERMINAL_TAG) {
             let rest = rest.trim_end_matches('\r');
             let mut parts = rest.splitn(4, '\t');
@@ -268,5 +341,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
         history,
         remote_terminals,
         panel_vis,
+        window_size,
+        open_tabs,
     })
 }

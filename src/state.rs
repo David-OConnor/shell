@@ -61,6 +61,29 @@ impl Default for PanelVis {
     }
 }
 
+/// Last GUI window size, in logical points (`x` = width, `y` = height).
+/// Persisted so the window reopens at the size the user left it. The CLI
+/// has no window and never reads this — like [PanelVis] it lives here only
+/// so a CLI-side save round-trips the GUI's value instead of dropping it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowSize {
+    pub x: f32,
+    pub y: f32,
+}
+
+/// GUI tab layout persisted across runs: the working directory of each open
+/// tab (in tab order) plus the index of the one that was active. Persisted so
+/// reopening the GUI restores the same set of tabs the user left open. Like
+/// [PanelVis] / [WindowSize] this lives in the shared lib only so a CLI-side
+/// save round-trips the GUI's value instead of dropping it; the CLI has no
+/// tabs of its own. An empty `paths` means "nothing saved" — the GUI falls
+/// back to a single tab at the current directory.
+#[derive(Clone, Debug, Default)]
+pub struct OpenTabs {
+    pub paths: Vec<PathBuf>,
+    pub active: usize,
+}
+
 /// Arrow-key recall state shared by the CLI and GUI. Tracks two independent
 /// axes that both load text into the input box:
 ///   * `his_cursor` — Up/Down walks `state.history` (all dirs).

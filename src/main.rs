@@ -21,7 +21,7 @@ use rustyline::{
     validate::Validator,
 };
 use shell::{
-    BrowserFile, NavState, PanelVis, RemoteTerminal, branch_indicator,
+    BrowserFile, NavState, OpenTabs, PanelVis, RemoteTerminal, WindowSize, branch_indicator,
     commands::{self, OutKind},
     complete_cd_path, current_branch, get_home, path_from_args, read_browser_files, save_data,
     state::{HistoryItem, RecentDir},
@@ -77,6 +77,14 @@ struct State {
     /// here purely so a CLI-side save round-trips the GUI's layout choice
     /// instead of clobbering it back to defaults.
     pub panel_vis: PanelVis,
+    /// Last GUI window size. Like `panel_vis`, the CLI never reads or mutates
+    /// this — it's held only so a CLI-side save writes the GUI's value back
+    /// unchanged instead of dropping the `WINDOW_SIZE` line.
+    pub window_size: Option<WindowSize>,
+    /// GUI open-tab layout. Like `panel_vis` / `window_size`, the CLI never
+    /// reads or mutates this — it's held only so a CLI-side save round-trips
+    /// the GUI's tabs back unchanged instead of dropping them.
+    pub open_tabs: OpenTabs,
     /// Cached git branch for `cwd`. `None` when cwd isn't inside a repo.
     /// Refreshed by `refresh_branch` after every command and after `cd` —
     /// branch can change behind our back via `git checkout`, so we re-check
@@ -98,6 +106,8 @@ impl Default for State {
             remote_terminals: Arc::new(Mutex::new(Vec::new())),
             browser_files: Arc::new(Mutex::new(Vec::new())),
             panel_vis: PanelVis::default(),
+            window_size: None,
+            open_tabs: OpenTabs::default(),
             branch,
         }
     }
@@ -177,6 +187,8 @@ impl State {
             &history,
             &remote_terminals,
             &self.panel_vis,
+            self.window_size,
+            &self.open_tabs,
             path,
         )
     }
@@ -198,6 +210,8 @@ impl State {
             remote_terminals: Arc::new(Mutex::new(loaded.remote_terminals)),
             browser_files: Arc::new(Mutex::new(Vec::new())),
             panel_vis: loaded.panel_vis,
+            window_size: loaded.window_size,
+            open_tabs: loaded.open_tabs,
             branch,
         })
     }
@@ -314,6 +328,12 @@ struct BookmarkHandler {
     /// never mutates this field, so the snapshot is always current and
     /// we just write it back unchanged to preserve GUI settings.
     panel_vis: PanelVis,
+    /// Snapshot of the GUI window size, written back unchanged for the same
+    /// reason as `panel_vis`.
+    window_size: Option<WindowSize>,
+    /// Snapshot of the GUI open-tab layout, written back unchanged for the
+    /// same reason as `panel_vis`.
+    open_tabs: OpenTabs,
     save_path: PathBuf,
     printer: SharedPrinter,
 }
@@ -345,6 +365,8 @@ impl ConditionalEventHandler for BookmarkHandler {
                                     &history,
                                     &remote_terminals,
                                     &self.panel_vis,
+                                    self.window_size,
+                                    &self.open_tabs,
                                     &self.save_path,
                                 ) {
                                     eprintln!("warning: failed to save state: {e}");
@@ -886,6 +908,8 @@ fn main() {
             history: state.history.clone(),
             remote_terminals: state.remote_terminals.clone(),
             panel_vis: state.panel_vis,
+            window_size: state.window_size,
+            open_tabs: state.open_tabs.clone(),
             save_path: state_path.clone(),
             printer: printer.clone(),
         })),
