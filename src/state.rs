@@ -1,6 +1,178 @@
-use std::path::{Path, PathBuf};
+use std::{
+    env, io,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
 
 use chrono::{DateTime, Utc};
+
+use crate::{branch_indicator, current_branch, get_home, read_browser_files, save_data};
+
+// todo: Instead of storing these Arc<Mutex>>s, perhaps we do it some other way; this is due
+// todo: due to how Rustyline expects it.
+pub struct State {
+    /// Cached.
+    pub home: Option<PathBuf>,
+    /// Shared with the Ctrl+H / arrow-key handlers, which render pages of
+    /// recent commands without holding `State`.
+    pub history: Arc<Mutex<Vec<HistoryItem>>>,
+    /// This initializes to env::current_dir, but is then managed from within
+    /// this program.
+    pub cwd: PathBuf,
+    /// User-controlled list of directory bookmarks that can be easily
+    /// navigated to. Shared with the readline key handler (Ctrl+B), which
+    /// is why it lives behind an Arc<Mutex<_>>.
+    pub dir_bookmarks: Arc<Mutex<Vec<PathBuf>>>,
+    /// Paths we've execute commands from. Works in a similar way to bookmarks.
+    pub recent_dirs: Arc<Mutex<Vec<RecentDir>>>,
+    pub remote_terminals: Arc<Mutex<Vec<RemoteTerminal>>>,
+    /// In the current dir. Note persistent, unlike some of our other lists.
+    /// Currently unused in this application; TBD. Used in the GUI
+    /// version.
+    pub browser_files: Arc<Mutex<Vec<BrowserFile>>>,
+    /// GUI panel-visibility settings. The CLI doesn't read these — they're
+    /// here purely so a CLI-side save round-trips the GUI's layout choice
+    /// instead of clobbering it back to defaults.
+    pub panel_vis: PanelVis,
+    /// Last GUI window size. Like `panel_vis`, the CLI never reads or mutates
+    /// this — it's held only so a CLI-side save writes the GUI's value back
+    /// unchanged instead of dropping the `WINDOW_SIZE` line.
+    pub window_size: Option<WindowSize>,
+    /// GUI open-tab layout. Like `panel_vis` / `window_size`, the CLI never
+    /// reads or mutates this — it's held only so a CLI-side save round-trips
+    /// the GUI's tabs back unchanged instead of dropping them.
+    pub open_tabs: OpenTabs,
+    /// Cached git branch for `cwd`. `None` when cwd isn't inside a repo.
+    /// Refreshed by `refresh_branch` after every command and after `cd` —
+    /// branch can change behind our back via `git checkout`, so we re-check
+    /// whenever the user has had a chance to mutate repo state.
+    pub branch: Option<String>,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        let cwd = env::current_dir().unwrap_or_default();
+        let branch = current_branch(&cwd);
+
+        Self {
+            home: get_home(),
+            history: Arc::new(Mutex::new(Vec::new())),
+            cwd,
+            dir_bookmarks: Arc::new(Mutex::new(Vec::new())),
+            recent_dirs: Arc::new(Mutex::new(Vec::new())),
+            remote_terminals: Arc::new(Mutex::new(Vec::new())),
+            browser_files: Arc::new(Mutex::new(Vec::new())),
+            panel_vis: PanelVis::default(),
+            window_size: None,
+            open_tabs: OpenTabs::default(),
+            branch,
+        }
+    }
+}
+
+impl State {
+    /// This defines what the general prompt looks like. Its adorning
+    /// characters let the user know they're in this shell. `nav` carries
+    /// the active recall cursors (see [NavState]); when either is `Some`,
+    /// the prompt grows by ` his N` or ` cd N` before the `$` to indicate
+    /// which item is currently loaded into the input.
+    pub(crate) fn prompt(&self, nav: &NavState) -> String {
+        // Mark the directory with a leading `*` when it's bookmarked.
+        let bookmarked = self
+            .dir_bookmarks
+            .lock()
+            .map(|list| list.contains(&self.cwd))
+            .unwrap_or(false);
+        let star = if bookmarked { "*" } else { "" };
+        format!(
+            "S {star}{}{}{}{} $ ",
+            self.cwd.display(),
+            branch_indicator(self.branch.as_deref()),
+            nav.his_indicator(),
+            nav.cd_indicator(),
+        )
+    }
+
+    /// Re-detect the git branch for `cwd`. Called after `cd` (cwd may have
+    /// moved in/out of a repo) and after every command (a `git checkout`
+    /// might have switched branches behind our back).
+    pub(crate) fn refresh_branch(&mut self) {
+        self.branch = current_branch(&self.cwd);
+    }
+
+    /// Re-read the directory listing for `cwd` into `browser_files`. The CLI
+    /// itself doesn't expose this listing yet, but the GUI uses the same
+    /// shared helper, so we keep the field populated for parity (and for
+    /// any future CLI-side use). Called after every successful directory
+    /// change (cd / bm / hist-recall) and at startup.
+    pub(crate) fn refresh_browser_files(&self) {
+        let files = read_browser_files(&self.cwd);
+        if let Ok(mut list) = self.browser_files.lock() {
+            *list = files;
+        }
+    }
+
+    /// Persist user-controlled state (bookmarks + recent dirs + history +
+    /// remote terminals) to the given file. Called after every mutation of
+    /// any of them. Locks in the order bookmarks → recent_dirs → history →
+    /// remote_terminals — keep this order consistent across all callers to
+    /// avoid lock-order deadlocks.
+    pub(crate) fn save(&self, path: &Path) -> io::Result<()> {
+        let bookmarks = self
+            .dir_bookmarks
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "bookmark lock poisoned"))?;
+
+        let recent = self
+            .recent_dirs
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "recent-dirs lock poisoned"))?;
+
+        let history = self
+            .history
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "history lock poisoned"))?;
+
+        let remote_terminals = self
+            .remote_terminals
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "remote-terminals lock poisoned"))?;
+
+        save_data::save_state(
+            &bookmarks,
+            &recent,
+            &history,
+            &remote_terminals,
+            &self.panel_vis,
+            self.window_size,
+            &self.open_tabs,
+            path,
+        )
+    }
+
+    /// Restore state from disk, returning a fresh `State` with that data.
+    /// A missing file is treated as "no saved state" and yields the default
+    /// `State::new()` values (not an error).
+    pub(crate) fn load(path: &Path) -> io::Result<Self> {
+        let loaded = save_data::load_state(path)?;
+        let cwd = env::current_dir().unwrap_or_default();
+        let branch = current_branch(&cwd);
+
+        Ok(Self {
+            home: get_home(),
+            history: Arc::new(Mutex::new(loaded.history)),
+            cwd,
+            dir_bookmarks: Arc::new(Mutex::new(loaded.bookmarks)),
+            recent_dirs: Arc::new(Mutex::new(loaded.recent_dirs)),
+            remote_terminals: Arc::new(Mutex::new(loaded.remote_terminals)),
+            browser_files: Arc::new(Mutex::new(Vec::new())),
+            panel_vis: loaded.panel_vis,
+            window_size: loaded.window_size,
+            open_tabs: loaded.open_tabs,
+            branch,
+        })
+    }
+}
 
 pub struct HistoryItem {
     pub text: String,

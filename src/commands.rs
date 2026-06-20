@@ -12,7 +12,12 @@
 //! `logs` is Linux-only because `journalctl` is. On other platforms we
 //! compile a stub that just reports that via the sink.
 
-use std::{path::Path, process::Command};
+use std::{
+    fs::File,
+    io::{BufRead, BufReader},
+    path::Path,
+    process::Command,
+};
 
 /// Which stream a chunk of output came from. Frontends use this to colour
 /// the line (stderr red, stdout default) and/or pick between stdout/stderr
@@ -167,4 +172,28 @@ pub fn logs(_service: &str, _follow: bool, sink: OutputSink) {
         OutKind::Stderr,
         "logs: only supported on Linux (uses journalctl)".to_string(),
     );
+}
+
+/// Like the Linux cat command; outputs the contents of a file to stdout.
+/// On any error (file missing, not readable, mid-stream read failure) it
+/// prints a `cat: ...` diagnostic to stderr and returns, matching the
+/// shell's other builtins.
+pub fn cat(path: &Path) {
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("cat: {}: {e}", path.display());
+            return;
+        }
+    };
+
+    for line in BufReader::new(file).lines() {
+        match line {
+            Ok(l) => println!("{l}"),
+            Err(e) => {
+                eprintln!("cat: {}: {e}", path.display());
+                return;
+            }
+        }
+    }
 }
