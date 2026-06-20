@@ -76,7 +76,7 @@ impl State {
     /// the active recall cursors (see [NavState]); when either is `Some`,
     /// the prompt grows by ` his N` or ` cd N` before the `$` to indicate
     /// which item is currently loaded into the input.
-    pub(crate) fn prompt(&self, nav: &NavState) -> String {
+    pub fn prompt(&self, nav: &NavState) -> String {
         // Mark the directory with a leading `*` when it's bookmarked.
         let bookmarked = self
             .dir_bookmarks
@@ -96,7 +96,7 @@ impl State {
     /// Re-detect the git branch for `cwd`. Called after `cd` (cwd may have
     /// moved in/out of a repo) and after every command (a `git checkout`
     /// might have switched branches behind our back).
-    pub(crate) fn refresh_branch(&mut self) {
+    pub fn refresh_branch(&mut self) {
         self.branch = current_branch(&self.cwd);
     }
 
@@ -105,7 +105,7 @@ impl State {
     /// shared helper, so we keep the field populated for parity (and for
     /// any future CLI-side use). Called after every successful directory
     /// change (cd / bm / hist-recall) and at startup.
-    pub(crate) fn refresh_browser_files(&self) {
+    pub fn refresh_browser_files(&self) {
         let files = read_browser_files(&self.cwd);
         if let Ok(mut list) = self.browser_files.lock() {
             *list = files;
@@ -117,7 +117,7 @@ impl State {
     /// any of them. Locks in the order bookmarks → recent_dirs → history →
     /// remote_terminals — keep this order consistent across all callers to
     /// avoid lock-order deadlocks.
-    pub(crate) fn save(&self, path: &Path) -> io::Result<()> {
+    pub fn save(&self, path: &Path) -> io::Result<()> {
         let bookmarks = self
             .dir_bookmarks
             .lock()
@@ -153,7 +153,7 @@ impl State {
     /// Restore state from disk, returning a fresh `State` with that data.
     /// A missing file is treated as "no saved state" and yields the default
     /// `State::new()` values (not an error).
-    pub(crate) fn load(path: &Path) -> io::Result<Self> {
+    pub fn load(path: &Path) -> io::Result<Self> {
         let loaded = save_data::load_state(path)?;
         let cwd = env::current_dir().unwrap_or_default();
         let branch = current_branch(&cwd);

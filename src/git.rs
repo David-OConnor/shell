@@ -1,10 +1,7 @@
 //! Basic git integration: For `sync`, and displaying info about the current branch
 //! if in a folder which contains a repo.
 
-use std::path::Path;
-use std::process::Command;
-use shell::util::BRANCH_NAME_MAX;
-
+use std::{path::Path, process::Command};
 
 /// Maximum number of branch-name characters shown in the prompt before we
 /// truncate with `...`. Kept in the lib so the CLI and GUI agree on the

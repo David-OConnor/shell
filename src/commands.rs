@@ -13,11 +13,17 @@
 //! compile a stub that just reports that via the sink.
 
 use std::{
+    env,
     fs::File,
+    io,
     io::{BufRead, BufReader},
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
 };
+
+use chrono::Utc;
+
+use crate::{HistoryItem, path_from_args, state::State};
 
 /// Which stream a chunk of output came from. Frontends use this to colour
 /// the line (stderr red, stdout default) and/or pick between stdout/stderr
@@ -196,4 +202,292 @@ pub fn cat(path: &Path) {
             }
         }
     }
+}
+
+/// Runs one command line. Returns false if the shell should exit.
+pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
+    let input = input.trim();
+    if input.is_empty() {
+        return true;
+    }
+
+    // Split into command + remainder for built-in dispatch.
+    let (cmd, args) = match input.find(char::is_whitespace) {
+        Some(i) => (&input[..i], input[i..].trim()),
+        None => (input, ""),
+    };
+
+    // `his`/`hist <n>` re-runs a previous history item. Handle it before
+    // recording the meta-invocation so the user's history stays focused on
+    // the resolved command (which the recursive call below will record).
+    if cmd == "his" || cmd == "hist" {
+        match args.parse::<usize>() {
+            Ok(idx) => {
+                let resolved = state
+                    .history
+                    .lock()
+                    .ok()
+                    .and_then(|h| h.get(idx).map(|item| item.text.clone()));
+                match resolved {
+                    Some(text) => {
+                        println!("> {text}");
+                        return run_command(state, state_path, &text);
+                    }
+                    None => eprintln!("{cmd}: no history item at index {idx}"),
+                }
+            }
+            Err(_) => eprintln!("{cmd}: usage: {cmd} <number>"),
+        }
+        return true;
+    }
+
+    // `hisd <n>` re-runs a previous history item in its original working
+    // directory, without changing the shell's CWD. Bypasses the built-in
+    // dispatcher and shells the command out directly, since the point is to
+    // run it elsewhere on the filesystem.
+    if cmd == "hisd" {
+        match args.parse::<usize>() {
+            Ok(idx) => {
+                let resolved = state
+                    .history
+                    .lock()
+                    .ok()
+                    .and_then(|h| h.get(idx).map(|item| (item.text.clone(), item.dir.clone())));
+
+                match resolved {
+                    Some((text, dir)) => {
+                        println!("> {text}  (in {})", dir.display());
+                        let result = if cfg!(windows) {
+                            Command::new("pwsh")
+                                .args(["-NoProfile", "-NoLogo", "-Command", &text])
+                                .current_dir(&dir)
+                                .status()
+                        } else {
+                            Command::new("sh")
+                                .args(["-c", text.as_str()])
+                                .current_dir(&dir)
+                                .status()
+                        };
+                        if let Err(e) = result {
+                            eprintln!("shell: {e}");
+                        }
+                    }
+                    None => eprintln!("hisd: no history item at index {idx}"),
+                }
+            }
+            Err(_) => eprintln!("hisd: usage: hisd <number>"),
+        }
+        return true;
+    }
+
+    if let Ok(mut hist) = state.history.lock() {
+        hist.push(HistoryItem {
+            text: input.to_string(),
+            dir: state.cwd.clone(),
+            dt: Utc::now(),
+        });
+    }
+
+    // Track directories we've run real commands from (everything except `cd`),
+    // so Ctrl+R / `cd <number>` can jump back to them. We always save below
+    // regardless, to flush the new history entry to disk.
+    if cmd != "cd" {
+        let cwd = state.cwd.clone();
+        shell::record_recent_dir(&state.recent_dirs, &cwd);
+    }
+
+    if let Err(e) = state.save(state_path) {
+        eprintln!("warning: failed to save state: {e}");
+    }
+
+    match cmd {
+        "exit" | "quit" => return false,
+
+        "sync" => {
+            // Delegate to the shared implementation; route its sink output
+            // to stdout/stderr. Trim trailing newlines so we don't double up
+            // on the ones println! adds — git output already ends with `\n`.
+            let cwd = state.cwd.clone();
+            let mut sink = |kind, msg: String| {
+                let msg = msg.trim_end_matches('\n');
+                match kind {
+                    OutKind::Stdout => println!("{msg}"),
+                    OutKind::Stderr => eprintln!("{msg}"),
+                }
+            };
+            sync(args, &cwd, &mut sink);
+        }
+
+        "logs" => {
+            // CLI uses `follow = true` so the user gets a live tail via
+            // inherited stdio; Ctrl+C exits journalctl and returns control
+            // to the shell. On non-Linux this is a no-op error via the sink.
+            let mut sink = |kind, msg: String| {
+                let msg = msg.trim_end_matches('\n');
+                match kind {
+                    OutKind::Stdout => println!("{msg}"),
+                    OutKind::Stderr => eprintln!("{msg}"),
+                }
+            };
+            logs(args, true, &mut sink);
+        }
+
+        // On linux, this is likely the same as the system `cat` command, but it works on Windows.
+        // Another approach may be to only apply this branch on Windows.
+        "cat" => {
+            let bookmarks = state.dir_bookmarks.lock();
+            let slice: &[PathBuf] = bookmarks.as_deref().map(|v| v.as_slice()).unwrap_or(&[]);
+            let target = path_from_args(state.home.as_deref(), &state.cwd, slice, args);
+            drop(bookmarks);
+            cat(&target);
+        }
+
+        "del" => {
+            // `del bm <number>`: delete a bookmark by its displayed index
+            // (the numbers shown by the Alt+B bookmark list).
+            let (sub, rest) = match args.find(char::is_whitespace) {
+                Some(i) => (&args[..i], args[i..].trim()),
+                None => (args, ""),
+            };
+
+            match sub {
+                "bm" => match rest.parse::<usize>() {
+                    Ok(idx) => {
+                        let mut removed = None;
+                        match state.dir_bookmarks.lock() {
+                            Ok(mut list) => {
+                                if idx < list.len() {
+                                    removed = Some(list.remove(idx));
+                                } else {
+                                    eprintln!(
+                                        "del bm: no bookmark at index {idx} (have {})",
+                                        list.len()
+                                    );
+                                }
+                            }
+                            Err(_) => eprintln!("del bm: bookmark list lock poisoned"),
+                        }
+                        if let Some(path) = removed {
+                            println!("Deleted bookmark: {}", path.display());
+                            if let Err(e) = state.save(state_path) {
+                                eprintln!("del bm: failed to save bookmarks: {e}");
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        eprintln!("del bm: expected a number, e.g. `del bm 4`");
+                    }
+                },
+                "" => eprintln!("del: usage: del bm <number>"),
+                other => eprintln!("del: unknown target `{other}` (expected `bm`)"),
+            }
+        }
+
+        "cd" => {
+            // `cd <number>` (with nothing else after) jumps to a recent
+            // directory by its Ctrl+R index. Anything else is resolved as a
+            // normal path/bookmark argument.
+            // When the arg parses as a number we treat it as a recent-dir
+            // index; remember the index so we can prune the entry if its
+            // path is stale (deleted/moved on disk).
+            let (target, recent_idx) = if let Ok(idx) = args.parse::<usize>() {
+                let resolved = state
+                    .recent_dirs
+                    .lock()
+                    .ok()
+                    .and_then(|list| list.get(idx).map(|r| r.path.clone()));
+                match resolved {
+                    Some(p) => (Some(p), Some(idx)),
+                    None => {
+                        eprintln!("cd: no recent directory at index {idx}");
+                        (None, None)
+                    }
+                }
+            } else {
+                let bookmarks = state.dir_bookmarks.lock();
+                let slice: &[PathBuf] = bookmarks.as_deref().map(|v| v.as_slice()).unwrap_or(&[]);
+                (
+                    Some(path_from_args(
+                        state.home.as_deref(),
+                        &state.cwd,
+                        slice,
+                        args,
+                    )),
+                    None,
+                )
+            };
+
+            if let Some(target) = target {
+                match env::set_current_dir(&target) {
+                    Ok(_) => state.cwd = env::current_dir().unwrap_or(target),
+                    Err(e) => {
+                        eprintln!("cd: {e}");
+                        // If the recent-dir entry's path no longer exists on
+                        // disk, prune it so the indices shift down and the
+                        // user doesn't hit the same stale row forever.
+                        if e.kind() == io::ErrorKind::NotFound {
+                            if let Some(i) = recent_idx {
+                                let mut removed = false;
+                                if let Ok(mut list) = state.recent_dirs.lock() {
+                                    if list.get(i).map(|r| r.path == target).unwrap_or(false) {
+                                        list.remove(i);
+                                        removed = true;
+                                    }
+                                }
+                                if removed {
+                                    eprintln!("cd: removed stale recent-dir entry {i}");
+                                    if let Err(e) = state.save(state_path) {
+                                        eprintln!("warning: failed to save state: {e}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // `bm <number>`: jump to the bookmark at that Alt+B index. Mirrors
+        // `cd <number>` but indexes into the bookmark list instead of
+        // recent_dirs.
+        "bm" => match args.parse::<usize>() {
+            Ok(idx) => {
+                let resolved = state
+                    .dir_bookmarks
+                    .lock()
+                    .ok()
+                    .and_then(|list| list.get(idx).cloned());
+                match resolved {
+                    Some(target) => match env::set_current_dir(&target) {
+                        Ok(_) => state.cwd = env::current_dir().unwrap_or(target),
+                        Err(e) => eprintln!("bm: {e}"),
+                    },
+                    None => eprintln!("bm: no bookmark at index {idx}"),
+                }
+            }
+            Err(_) => eprintln!("bm: usage: bm <number>"),
+        },
+
+        // Everything else: Pass through to the system shell (e.g. the one which we launched this
+        // application from)
+        _ => {
+            let result = if cfg!(windows) {
+                // Powershell 7+; we will assume Windows users have this.
+                // -NoProfile/-NoLogo skip loading the user's $PROFILE and the
+                // startup banner, which together dominate pwsh's cold-start
+                // time. Each command spawns a fresh process, so this shaves
+                // ~200ms off every passthrough command.
+                Command::new("pwsh")
+                    .args(["-NoProfile", "-NoLogo", "-Command", input])
+                    .status()
+            } else {
+                Command::new("sh").args(["-c", input]).status()
+            };
+            if let Err(e) = result {
+                eprintln!("shell: {e}");
+            }
+        }
+    }
+
+    true
 }
