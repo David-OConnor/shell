@@ -14,6 +14,6 @@ pub use input_completion::{
 };
 pub use state::{
     BrowserFile, HistoryItem, NavState, OpenTabs, PanelVis, RecentDir, RemoteTerminal, WindowSize,
-    nav_indicator,
+    nav_indicator, record_recent_dir,
 };
 pub use util::{get_home, path_from_args, read_browser_files, render_with_tilde};

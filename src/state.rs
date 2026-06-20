@@ -419,6 +419,21 @@ impl Default for NavState {
     }
 }
 
+/// Record `cwd` in the recent-dirs list. If the path is already present we
+/// remove the old entry and push a fresh one to the end, so the list stays
+/// deduped and the newest entry sits at the bottom of the display. Shared by
+/// the CLI (`commands::run_command`) and the readline key handlers, hence the
+/// `Arc<Mutex<_>>` handle rather than a plain `&mut Vec`.
+pub fn record_recent_dir(recent: &Arc<Mutex<Vec<RecentDir>>>, cwd: &Path) {
+    if let Ok(mut list) = recent.lock() {
+        list.retain(|r| r.path != cwd);
+        list.push(RecentDir {
+            path: cwd.to_path_buf(),
+            dt: Utc::now(),
+        });
+    }
+}
+
 /// Build a ` <prefix> N` indicator (with leading space) or empty string.
 /// Used by both axes; see [NavState::his_indicator] / [NavState::cd_indicator].
 pub fn nav_indicator(prefix: &str, cursor: Option<usize>) -> String {

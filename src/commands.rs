@@ -293,7 +293,7 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
     // regardless, to flush the new history entry to disk.
     if cmd != "cd" {
         let cwd = state.cwd.clone();
-        shell::record_recent_dir(&state.recent_dirs, &cwd);
+        crate::record_recent_dir(&state.recent_dirs, &cwd);
     }
 
     if let Err(e) = state.save(state_path) {

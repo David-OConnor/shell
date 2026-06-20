@@ -7,7 +7,7 @@ use std::{
 };
 
 use rustyline::highlight::Highlighter;
-use shell::{HistoryItem, NavState, RecentDir};
+use shell::{HistoryItem, RecentDir};
 
 use crate::{BRANCH_PREFIX, CD_PREFIX, DISP_HIST_LEN, DIVIDER, HIS_PREFIX, ShellHelper};
 

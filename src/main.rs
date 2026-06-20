@@ -4,29 +4,25 @@
 
 use std::{
     env, io,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
-use chrono::Utc;
 use rustyline::{
     Cmd, CompletionType, ConditionalEventHandler, Config, Context, Editor, Event, EventContext,
     EventHandler, ExternalPrinter, Helper, KeyCode, KeyEvent, Modifiers, RepeatCount,
     completion::{Completer, FilenameCompleter, Pair},
     error::ReadlineError,
-    highlight::Highlighter,
     hint::Hinter,
     history::FileHistory,
     validate::Validator,
 };
 use shell::{
-    NavState, OpenTabs, PanelVis, RemoteTerminal, WindowSize, commands,
-    commands::{self},
+    NavState, OpenTabs, PanelVis, RemoteTerminal, WindowSize, commands, complete_cd_path,
     save_data,
     state::{HistoryItem, RecentDir},
 };
 
-mod input_completion;
 mod key_handling;
 mod render;
 
@@ -40,7 +36,7 @@ const CD_PREFIX: &str = " cd ";
 pub use shell::BRANCH_PREFIX;
 use shell::state::State;
 
-use crate::input_completion::complete_cd_path;
+use crate::key_handling::ArrowHandler;
 
 /// Shared handle to rustyline's `ExternalPrinter`. Key handlers use this to
 /// print messages *above* the in-progress prompt line — going through
@@ -323,19 +319,6 @@ impl ConditionalEventHandler for ShowListHandler {
             }
         }
         Some(Cmd::Noop)
-    }
-}
-
-/// Record `cwd` in the recent-dirs list. If the path is already present we
-/// remove the old entry and push a fresh one to the end, so the list stays
-/// deduped and the newest entry sits at the bottom of the display.
-fn record_recent_dir(recent: &Arc<Mutex<Vec<RecentDir>>>, cwd: &Path) {
-    if let Ok(mut list) = recent.lock() {
-        list.retain(|r| r.path != cwd);
-        list.push(RecentDir {
-            path: cwd.to_path_buf(),
-            dt: Utc::now(),
-        });
     }
 }
 

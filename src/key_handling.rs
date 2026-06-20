@@ -5,10 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use rustyline::{
-    binding::{ConditionalEventHandler, Event, EventContext},
-    keymap::{Cmd, RepeatCount},
-};
+use rustyline::{Cmd, ConditionalEventHandler, Event, EventContext, RepeatCount};
 use shell::state::{HistoryItem, RecentDir};
 
 use crate::{CliNav, NavAxis, render};
@@ -19,13 +16,13 @@ use crate::{CliNav, NavAxis, render};
 /// re-call `readline_with_initial` with an updated prompt that includes
 /// the matching ` his N` or ` cd N` indicator.
 pub(crate) struct ArrowHandler {
-    history: Arc<Mutex<Vec<HistoryItem>>>,
-    recent_dirs: Arc<Mutex<Vec<RecentDir>>>,
-    home: Option<PathBuf>,
-    nav: Arc<Mutex<CliNav>>,
-    axis: NavAxis,
+    pub(crate) history: Arc<Mutex<Vec<HistoryItem>>>,
+    pub(crate) recent_dirs: Arc<Mutex<Vec<RecentDir>>>,
+    pub(crate) home: Option<PathBuf>,
+    pub(crate) nav: Arc<Mutex<CliNav>>,
+    pub(crate) axis: NavAxis,
     /// Direction: Up / Left ⇒ `true` (older); Down / Right ⇒ `false`.
-    backward: bool,
+    pub(crate) backward: bool,
 }
 
 impl ConditionalEventHandler for ArrowHandler {
