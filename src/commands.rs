@@ -89,8 +89,7 @@ pub fn sync(message: &str, cwd: &Path, sink: OutputSink) {
     }
 }
 
-/// Implements `logs <service>`: runs `sudo journalctl -u <service>`.
-///
+/// Used for our `log` command: wrapper around `sudo journalctl -u <service> -f
 /// With `follow = true` the child inherits stdio and tails logs live
 /// (`journalctl -f`); the sink is used only for wrapper diagnostics since
 /// stdout/stderr go straight to the terminal. The CLI uses this.
@@ -168,7 +167,7 @@ pub fn logs(service: &str, follow: bool, sink: OutputSink) {
     }
 }
 
-/// Stub for non-Linux targets. `journalctl` only exists on systemd-based
+/// `journalctl` only exists on systemd-based
 /// Linux distros, so rather than silently falling through to the system
 /// shell (where the word `journalctl` is a "command not found"), we surface
 /// a clear message.
@@ -183,8 +182,9 @@ pub fn logs(_service: &str, _follow: bool, sink: OutputSink) {
 /// Like the Linux cat command; outputs the contents of a file to stdout.
 /// On any error (file missing, not readable, mid-stream read failure) it
 /// prints a `cat: ...` diagnostic to stderr and returns, matching the
-/// shell's other builtins.
-pub fn cat(path: &Path) {
+/// shell's other builtins. Only `run_command` (below) dispatches to this, so
+/// it stays private to the module.
+fn cat(path: &Path) {
     let file = match File::open(path) {
         Ok(f) => f,
         Err(e) => {
@@ -343,7 +343,7 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
         }
 
         "del" => {
-            // `del bm <number>`: delete a bookmark by its displayed index
+            // Delete a bookmark by its displayed index
             // (the numbers shown by the Alt+B bookmark list).
             let (sub, rest) = match args.find(char::is_whitespace) {
                 Some(i) => (&args[..i], args[i..].trim()),
@@ -387,7 +387,7 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
             // `cd <number>` (with nothing else after) jumps to a recent
             // directory by its Ctrl+R index. Anything else is resolved as a
             // normal path/bookmark argument.
-            // When the arg parses as a number we treat it as a recent-dir
+            // When the arg parses as a number, we treat it as a recent-dir
             // index; remember the index so we can prune the entry if its
             // path is stale (deleted/moved on disk).
             let (target, recent_idx) = if let Ok(idx) = args.parse::<usize>() {
@@ -422,6 +422,7 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
                     Ok(_) => state.cwd = env::current_dir().unwrap_or(target),
                     Err(e) => {
                         eprintln!("cd: {e}");
+
                         // If the recent-dir entry's path no longer exists on
                         // disk, prune it so the indices shift down and the
                         // user doesn't hit the same stale row forever.

@@ -4,9 +4,9 @@
 use std::{path::Path, process::Command};
 
 /// Maximum number of branch-name characters shown in the prompt before we
-/// truncate with `...`. Kept in the lib so the CLI and GUI agree on the
-/// exact form of the indicator (which the CLI's highlighter has to parse).
-pub const BRANCH_NAME_MAX: usize = 10;
+/// truncate with `...`. Only used by `branch_indicator` below; the GUI passes
+/// its own literal to `truncate_branch`, so this stays private to the module.
+const BRANCH_NAME_MAX: usize = 10;
 
 /// Prefix used in the assembled prompt for the git-branch indicator, e.g.
 /// `S <cwd> branch: main $`. The leading space is part of the marker so a
@@ -52,8 +52,9 @@ pub fn truncate_branch(name: &str, max: usize) -> String {
 /// Render the branch slot for a prompt: empty string when there's no
 /// branch, or ` branch: NAME` (with a leading space) using
 /// [BRANCH_NAME_MAX]-char truncation. Used by both shells so the form
-/// stays in sync with what the CLI highlighter looks for.
-pub fn branch_indicator(branch: Option<&str>) -> String {
+/// stays in sync with what the CLI highlighter looks for. Only the lib's own
+/// `State::prompt` builds this slot, so it's crate-private.
+pub(crate) fn branch_indicator(branch: Option<&str>) -> String {
     match branch {
         Some(b) => format!("{BRANCH_PREFIX}{}", truncate_branch(b, BRANCH_NAME_MAX)),
         None => String::new(),

@@ -1,5 +1,5 @@
 //! Functionality related to rendering text on screen; generally string
-//! manipluation with color.
+//! manipulation with color.
 
 use std::{
     borrow::Cow,
@@ -252,6 +252,7 @@ fn highlight_input(line: &str) -> String {
         render_word(&mut out, text, color);
         last = end;
     }
+
     // Trailing whitespace, if any.
     out.push_str(&line[last..]);
     out

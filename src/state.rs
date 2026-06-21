@@ -6,19 +6,21 @@ use std::{
 
 use chrono::{DateTime, Utc};
 
-use crate::{branch_indicator, current_branch, get_home, read_browser_files, save_data};
+use crate::{current_branch, get_home, git::branch_indicator, read_browser_files, save_data};
 
 // todo: Instead of storing these Arc<Mutex>>s, perhaps we do it some other way; this is due
 // todo: due to how Rustyline expects it.
 pub struct State {
-    /// Cached.
-    pub home: Option<PathBuf>,
+    /// Cached. Read by `commands` (path resolution) but not by the binary
+    /// frontends, so crate-private.
+    pub(crate) home: Option<PathBuf>,
     /// Shared with the Ctrl+H / arrow-key handlers, which render pages of
     /// recent commands without holding `State`.
     pub history: Arc<Mutex<Vec<HistoryItem>>>,
     /// This initializes to env::current_dir, but is then managed from within
-    /// this program.
-    pub cwd: PathBuf,
+    /// this program. Mutated by `commands` (cd/bm), so crate-private rather
+    /// than fully public.
+    pub(crate) cwd: PathBuf,
     /// User-controlled list of directory bookmarks that can be easily
     /// navigated to. Shared with the readline key handler (Ctrl+B), which
     /// is why it lives behind an Arc<Mutex<_>>.
@@ -27,9 +29,10 @@ pub struct State {
     pub recent_dirs: Arc<Mutex<Vec<RecentDir>>>,
     pub remote_terminals: Arc<Mutex<Vec<RemoteTerminal>>>,
     /// In the current dir. Note persistent, unlike some of our other lists.
-    /// Currently unused in this application; TBD. Used in the GUI
-    /// version.
-    pub browser_files: Arc<Mutex<Vec<BrowserFile>>>,
+    /// Currently unused in this application; TBD. (The GUI keeps its own copy
+    /// on its own `State`.) Only `refresh_browser_files` writes it, so it's
+    /// private to this module.
+    browser_files: Arc<Mutex<Vec<BrowserFile>>>,
     /// GUI panel-visibility settings. The CLI doesn't read these — they're
     /// here purely so a CLI-side save round-trips the GUI's layout choice
     /// instead of clobbering it back to defaults.
@@ -45,8 +48,9 @@ pub struct State {
     /// Cached git branch for `cwd`. `None` when cwd isn't inside a repo.
     /// Refreshed by `refresh_branch` after every command and after `cd` —
     /// branch can change behind our back via `git checkout`, so we re-check
-    /// whenever the user has had a chance to mutate repo state.
-    pub branch: Option<String>,
+    /// whenever the user has had a chance to mutate repo state. Only written
+    /// by `refresh_branch` and read by `prompt`, both here, so it's private.
+    branch: Option<String>,
 }
 
 impl Default for State {
@@ -116,8 +120,10 @@ impl State {
     /// remote terminals) to the given file. Called after every mutation of
     /// any of them. Locks in the order bookmarks → recent_dirs → history →
     /// remote_terminals — keep this order consistent across all callers to
-    /// avoid lock-order deadlocks.
-    pub fn save(&self, path: &Path) -> io::Result<()> {
+    /// avoid lock-order deadlocks. Only `commands::run_command` calls this
+    /// (the binary persists via `save_data::save_state` directly), so it's
+    /// crate-private.
+    pub(crate) fn save(&self, path: &Path) -> io::Result<()> {
         let bookmarks = self
             .dir_bookmarks
             .lock()
@@ -205,10 +211,10 @@ pub struct RemoteTerminal {
     pub password: String, // todo: Determine how to handle this
 }
 
-/// Which optional side panels in the GUI are currently visible. Lives in
+/// Which optional side panels in the GUI are currently visible. This lives in
 /// the shared lib so the CLI can round-trip it through the save file
-/// without understanding what each panel does — the user's preferred
-/// layout sticks across runs even if CLI and GUI usage are interleaved.
+/// without understanding what each panel does.
+///
 /// Each field is `true` for visible, `false` for hidden.
 #[derive(Clone, Copy, Debug)]
 pub struct PanelVis {
@@ -272,6 +278,9 @@ pub struct OpenTabs {
 pub struct NavState {
     pub his_cursor: Option<usize>,
     pub cd_cursor: Option<usize>,
+    /// In-progress input snapshot, managed through `step_his`/`step_cd` and
+    /// `reset`. Public because `shell_gui` constructs `NavState` with a struct
+    /// literal (`..NavState::new()`), which requires every field be visible.
     pub draft: String,
     pub draft_set: bool,
 }
@@ -293,11 +302,6 @@ impl NavState {
         self.draft_set = false;
     }
 
-    /// `true` when *any* recall axis is currently active.
-    pub fn is_active(&self) -> bool {
-        self.his_cursor.is_some() || self.cd_cursor.is_some()
-    }
-
     /// Snapshot the live input as the draft the first time recall starts.
     fn ensure_draft(&mut self, live_input: &str) {
         if !self.draft_set {
@@ -312,8 +316,8 @@ impl NavState {
         std::mem::take(&mut self.draft)
     }
 
-    /// Step the history (his) axis in response to an Up (`up = true`) or
-    /// Down arrow. `live_input` is the current input buffer.
+    /// Step the history  axis in response to an Up or
+    /// Down arrow key press. `live_input` is the current input buffer.
     ///
     /// Returns the text the input box should now show, or `None` when the
     /// step is a no-op (Down with nothing recalled, Up at the oldest entry,
@@ -328,6 +332,7 @@ impl NavState {
         if len == 0 {
             return None;
         }
+
         let new_cursor: Option<usize> = match (self.his_cursor, up) {
             (None, true) => {
                 self.ensure_draft(live_input);
@@ -345,10 +350,12 @@ impl NavState {
                 }
             }
         };
+
         let text = match new_cursor {
             Some(c) => history[c].text.clone(),
             None => self.pop_draft(),
         };
+
         self.his_cursor = new_cursor;
         Some(text)
     }
@@ -374,6 +381,7 @@ impl NavState {
         if len == 0 {
             return None;
         }
+
         let new_cursor: Option<usize> = match (self.cd_cursor, left) {
             (None, true) => {
                 self.ensure_draft(live_input);
@@ -391,11 +399,14 @@ impl NavState {
                 }
             }
         };
+
         let text = match new_cursor {
             Some(c) => render_buffer(&recent[c].path),
             None => self.pop_draft(),
         };
+
         self.cd_cursor = new_cursor;
+
         Some(text)
     }
 
@@ -436,7 +447,8 @@ pub fn record_recent_dir(recent: &Arc<Mutex<Vec<RecentDir>>>, cwd: &Path) {
 
 /// Build a ` <prefix> N` indicator (with leading space) or empty string.
 /// Used by both axes; see [NavState::his_indicator] / [NavState::cd_indicator].
-pub fn nav_indicator(prefix: &str, cursor: Option<usize>) -> String {
+/// Internal helper for those two methods, so it's module-private.
+fn nav_indicator(prefix: &str, cursor: Option<usize>) -> String {
     match cursor {
         Some(i) => format!(" {prefix} {i}"),
         None => String::new(),

@@ -3,17 +3,6 @@
 //! terminals, but the file format is line-based and tagged so we can add
 //! more record types later without breaking existing files.
 //!
-//! Format:
-//!   # comments and blank lines are ignored
-//!   BOOKMARK <absolute path>
-//!   RECENT_DIR <rfc3339 timestamp> <absolute path>
-//!   HISTORY <rfc3339 timestamp>\t<absolute path>\t<command text>
-//!   REMOTE_TERMINAL <host>\t<port>\t<username>\t<password>
-//!   PANEL_VIS <key>=<0|1> <key>=<0|1> ...
-//!   WINDOW_SIZE x=<width> y=<height>
-//!   OPEN_TAB <absolute path>
-//!   ACTIVE_TAB <index>
-//!
 //! HISTORY and REMOTE_TERMINAL use TAB as a field separator (rather than
 //! space like RECENT_DIR) because the trailing fields can contain spaces.
 //! Newlines in the command text are flattened to spaces on save so each
@@ -143,16 +132,12 @@ pub fn save_state(
     )?;
 
     // WindowSize: GUI-only. Written only when present so a CLI-side save
-    // (which passes `None`) preserves whatever the GUI last recorded rather
-    // than clobbering or zeroing it.
+    // (which passes `None`) preserves whatever the GUI last recorded.
     if let Some(ws) = window_size {
         writeln!(f, "{WINDOW_SIZE_TAG}x={} y={}", ws.x, ws.y)?;
     }
 
-    // OpenTabs: GUI-only. One `OPEN_TAB <path>` line per tab in tab order,
-    // followed by a single `ACTIVE_TAB <index>`. Written only when there's at
-    // least one tab so a CLI-side save (which round-trips an empty `OpenTabs`)
-    // doesn't emit a meaningless `ACTIVE_TAB 0` with no tabs.
+    // OpenTabs: GUI-only.
     if !open_tabs.paths.is_empty() {
         for path in &open_tabs.paths {
             writeln!(f, "{OPEN_TAB_TAG}{}", path.display())?;
@@ -222,12 +207,15 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
+
         if let Some(rest) = trimmed.strip_prefix(BOOKMARK_TAG) {
             bookmarks.push(PathBuf::from(rest.trim_end()));
             continue;
         }
+
         if let Some(rest) = trimmed.strip_prefix(RECENT_DIR_TAG) {
             let rest = rest.trim_end();
+
             // Split on the first space: token 1 is the rfc3339 dt, the rest
             // is the path (which may itself contain spaces).
             if let Some(space) = rest.find(' ') {

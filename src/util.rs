@@ -57,8 +57,10 @@ pub fn path_from_args(
 
 /// Render a path as `~/relative` when it lives under the home directory;
 /// otherwise use the absolute form. Uses forward slashes after the tilde for
-/// consistency with the rest of the shell.
-pub fn render_with_tilde(p: &Path, home: Option<&Path>) -> String {
+/// consistency with the rest of the shell. Only `input_completion` uses this
+/// within the lib (the CLI and GUI each have their own copy), so it's
+/// crate-private rather than part of the public API.
+pub(crate) fn render_with_tilde(p: &Path, home: Option<&Path>) -> String {
     if let Some(home) = home {
         if let Ok(rest) = p.strip_prefix(home) {
             let rest_str = rest.to_string_lossy().replace('\\', "/");
