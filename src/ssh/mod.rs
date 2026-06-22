@@ -34,12 +34,13 @@ use tokio::runtime::Runtime;
 mod exec;
 mod interactive;
 
-/// Which interaction mode a live session is in. Toggled at runtime; defaults to
-/// [`SshMode::Exec`] on connect.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// Which interaction mode a live session is in. Toggled at runtime; new
+/// sessions start in the `#[default]` mode ([`SshMode::Pty`]) on connect.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum SshMode {
     /// One channel per typed command, output captured in a batch.
     Exec,
+    #[default]
     /// A persistent PTY + login shell with bytes streamed both ways.
     Pty,
 }
@@ -133,7 +134,10 @@ pub fn connect(host: &str, port: u16, user: &str, password: &str) -> io::Result<
         Ok::<_, io::Error>(handle)
     })?;
 
-    Ok(RemoteSession {
+    // Built in Exec first because it's the base state with no PTY channel;
+    // `set_mode` below transitions from here, opening the PTY/shell channel
+    // when the default mode is Pty.
+    let mut session = RemoteSession {
         rt,
         handle,
         user: user.to_string(),
@@ -142,7 +146,13 @@ pub fn connect(host: &str, port: u16, user: &str, password: &str) -> io::Result<
         mode: SshMode::Exec,
         cwd: String::new(),
         pty: None,
-    })
+    };
+
+    // Honour the configured default interaction mode (see `SshMode`'s
+    // `#[default]`, currently Pty/interactive) rather than hardcoding one here.
+    session.set_mode(SshMode::default())?;
+
+    Ok(session)
 }
 
 impl RemoteSession {

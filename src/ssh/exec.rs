@@ -43,6 +43,12 @@ impl RemoteSession {
                 .exec(true, wrapped.as_bytes())
                 .await
                 .map_err(map_err)?;
+            // Exec mode never feeds stdin, so close the input direction right
+            // away. Without this, a command that reads stdin (`python`, `cat`
+            // with no args, …) blocks forever waiting for bytes that will never
+            // come; EOF lets it run to completion (or exit cleanly) instead.
+            // Interactive programs belong in PTY mode (`mode pty`).
+            channel.eof().await.map_err(map_err)?;
             while let Some(msg) = channel.wait().await {
                 match msg {
                     ChannelMsg::Data { ref data } => stdout_buf.extend_from_slice(data),

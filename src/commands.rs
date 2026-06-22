@@ -93,6 +93,26 @@ pub fn sync(message: &str, cwd: &Path, sink: OutputSink) {
     }
 }
 
+/// Build the remote shell command that `sync <message>` maps to over SSH.
+/// Mirrors the local [`sync`] steps (add → commit → push) as a single
+/// `&&`-chained line so it stops on the first failure, run from the session's
+/// tracked remote cwd. Returns `None` (after emitting a diagnostic via `sink`)
+/// when the commit message is empty, matching the local guard.
+fn remote_sync_command(message: &str, sink: OutputSink) -> Option<String> {
+    let message = message.trim().trim_matches('"');
+    if message.is_empty() {
+        sink(
+            OutKind::Stderr,
+            "sync: commit message required, e.g. sync \"my commit message\"".to_string(),
+        );
+        return None;
+    }
+    // Single-quote the message so spaces/specials survive the remote shell;
+    // escape any embedded single quotes the usual `'\''` way.
+    let escaped = message.replace('\'', "'\\''");
+    Some(format!("git add . && git commit -am '{escaped}' && git push"))
+}
+
 /// Used for our `log` command: wrapper around `sudo journalctl -u <service> -f
 /// With `follow = true` the child inherits stdio and tails logs live
 /// (`journalctl -f`); the sink is used only for wrapper diagnostics since
@@ -181,6 +201,29 @@ pub fn logs(_service: &str, _follow: bool, sink: OutputSink) {
         OutKind::Stderr,
         "logs: only supported on Linux (uses journalctl)".to_string(),
     );
+}
+
+/// Build the remote shell command that `logs <service>` maps to over SSH.
+/// Mirrors the non-follow local path (`logs` with `follow = false`): a bounded,
+/// non-paged snapshot, since exec-mode SSH has no tty to host a live `-f` tail.
+/// `journalctl` runs under `sudo` to match the local built-in — over exec mode
+/// (no tty) that needs passwordless sudo on the remote, otherwise sudo's prompt
+/// surfaces as a stderr diagnostic. Returns `None` (after emitting a diagnostic
+/// via `sink`) when the service name is empty, matching the local guard.
+fn remote_logs_command(service: &str, sink: OutputSink) -> Option<String> {
+    let service = service.trim().trim_matches('"');
+    if service.is_empty() {
+        sink(
+            OutKind::Stderr,
+            "logs: service required, e.g. logs gunicorn".to_string(),
+        );
+        return None;
+    }
+    // Single-quote the unit name so it survives the remote shell intact.
+    let escaped = service.replace('\'', "'\\''");
+    Some(format!(
+        "sudo journalctl -u '{escaped}' -n 200 --no-pager"
+    ))
 }
 
 /// Like the Linux cat command; outputs the contents of a file to stdout.
@@ -308,26 +351,46 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
     // than locally. Only the session-management keywords are intercepted here;
     // everything else (including `cd`, `ls`, …) is sent to the remote shell.
     if state.active_remote.is_some() {
-        match cmd {
+        let mut sink = |kind, msg: String| {
+            let msg = msg.trim_end_matches('\n');
+            match kind {
+                OutKind::Stdout => println!("{msg}"),
+                OutKind::Stderr => eprintln!("{msg}"),
+            }
+        };
+
+        // Resolve what to actually run on the remote. Session-management
+        // keywords are handled here and short-circuit. The shell's Rust
+        // built-ins (`logs`, `sync`) are translated to their equivalent remote
+        // command — the remote shell has never heard of them and would just
+        // answer "command not found". Everything else is sent verbatim.
+        let remote_cmd: Option<String> = match cmd {
             "exit" | "quit" | "logout" | "disconnect" => {
                 if let Some(session) = state.active_remote.take() {
                     session.disconnect();
                 }
                 println!("ssh: disconnected");
+                return true;
             }
-            "mode" => remote_set_mode(state, args),
-            _ => {
-                let mut sink = |kind, msg: String| {
-                    let msg = msg.trim_end_matches('\n');
-                    match kind {
-                        OutKind::Stdout => println!("{msg}"),
-                        OutKind::Stderr => eprintln!("{msg}"),
-                    }
-                };
-                if let Some(session) = state.active_remote.as_mut() {
-                    if let Err(e) = session.run(input, &mut sink) {
-                        eprintln!("ssh: {e}");
-                    }
+            "mode" => {
+                remote_set_mode(state, args);
+                return true;
+            }
+            "logs" => match remote_logs_command(args, &mut sink) {
+                Some(cmd) => Some(cmd),
+                None => return true,
+            },
+            "sync" => match remote_sync_command(args, &mut sink) {
+                Some(cmd) => Some(cmd),
+                None => return true,
+            },
+            _ => Some(input.to_string()),
+        };
+
+        if let Some(command) = remote_cmd {
+            if let Some(session) = state.active_remote.as_mut() {
+                if let Err(e) = session.run(&command, &mut sink) {
+                    eprintln!("ssh: {e}");
                 }
             }
         }
@@ -636,13 +699,26 @@ fn cmd_ssh(state: &mut State, state_path: &Path, args: &str) {
     match ssh::connect(&host, port, &user, &password) {
         Ok(session) => {
             println!(
-                "Connected. `exit` disconnects; `mode pty` opens an interactive shell, `mode exec` returns."
+                "Connected to {user}@{host}. Commands run remotely; `mode pty` opens an interactive shell (python, vim, …), `exit` disconnects."
             );
             record_remote(state, &host, port, &user);
             if let Err(e) = state.save(state_path) {
                 eprintln!("warning: failed to save state: {e}");
             }
             state.active_remote = Some(session);
+
+            // Stay in the shell's own command interface — prompt, history,
+            // highlighting, completion — and route each typed command to the
+            // remote via exec mode. (The session connects in PTY mode by
+            // default for the GUI's sake; the CLI switches to exec so it keeps
+            // its rich line editing instead of handing the terminal to a raw
+            // remote shell.) The user opts into a raw interactive shell with
+            // `mode pty` when one is actually needed — e.g. python, vim, top.
+            if let Some(session) = state.active_remote.as_mut() {
+                if let Err(e) = session.set_mode(SshMode::Exec) {
+                    eprintln!("ssh: {e}");
+                }
+            }
         }
         Err(e) => eprintln!("ssh: {e}"),
     }
@@ -742,13 +818,25 @@ fn remote_set_mode(state: &mut State, args: &str) {
         return;
     }
 
-    // Entering PTY mode: open the shell channel, then drive the interactive loop.
+    // Entering PTY mode: open the shell channel (a no-op if we're already in
+    // PTY mode, e.g. straight after connect), then drive the interactive loop.
     if let Some(session) = state.active_remote.as_mut() {
         if let Err(e) = session.set_mode(SshMode::Pty) {
             eprintln!("mode: {e}");
             return;
         }
-        println!("-- interactive shell (Ctrl+] to detach) --");
+    }
+    enter_pty_loop(state);
+}
+
+/// Drive the raw-terminal interactive loop for the active session's PTY,
+/// returning to the caller when the remote shell exits (we disconnect) or the
+/// user detaches with Ctrl+] (we drop back to exec mode, keeping the
+/// connection). The session must already be in [`SshMode::Pty`]. Shared by the
+/// initial connect (which lands in PTY mode by default) and `mode pty`.
+fn enter_pty_loop(state: &mut State) {
+    if let Some(session) = state.active_remote.as_mut() {
+        println!("-- interactive shell (Ctrl+] to detach to command mode) --");
         if let Err(e) = cli_pty_loop(session) {
             eprintln!("mode: pty: {e}");
         }
@@ -768,6 +856,9 @@ fn remote_set_mode(state: &mut State, args: &str) {
         println!("ssh: remote shell exited; disconnected");
     } else if let Some(session) = state.active_remote.as_mut() {
         let _ = session.set_mode(SshMode::Exec);
+        println!(
+            "ssh: detached to command mode (`mode pty` resumes the interactive shell, `exit` disconnects)"
+        );
     }
 }
 
