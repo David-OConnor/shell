@@ -5,4 +5,16 @@ edition = "2024"
 
 [dependencies]
 chrono = "0.4.44"
+
+# Hmm. What's this for?
 rustyline = "18.0.0"
+crossterm = "0.29.0"
+
+# For use with ssh.
+keyring = { version = "3", features = ["windows-native", "sync-secret-service", "linux-native"] }
+# Default features pull `aws-lc-rs`, whose `aws-lc-sys` build needs NASM + a C
+# toolchain on Windows. Use the pure-Rust-ish `ring` crypto backend instead
+# (vendored asm, no NASM), keeping compression (`flate2`) and RSA key support.
+russh = { version = "0.61.2", default-features = false, features = ["ring", "flate2", "rsa"] }
+# Required for russh.
+tokio = { version = "1.52.3", features = ["rt", "io-util", "macros", "sync", "rt-multi-thread", "net", "time"] }

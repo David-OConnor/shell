@@ -22,6 +22,8 @@ pub const COLOR_TEAL: &str = "\x1b[96m"; // program command (e.g. `git`)
 pub const COLOR_MAGENTA: &str = "\x1b[95m"; // subcommand (e.g. `commit`)
 pub const COLOR_GREEN: &str = "\x1b[92m"; // parameters / flags (e.g. `-am`)
 pub const COLOR_ORANGE: &str = "\x1b[38;5;208m"; // quote characters `'` and `"`
+pub const COLOR_DIM: &str = "\x1b[90m"; // dimmed grey for ghost-text autosuggestions
+pub const COLOR_RED: &str = "\x1b[91m"; // unrecognised command word
 
 /// Render a path as `~/relative` when it lives under the home directory;
 /// otherwise use the absolute form. Uses forward slashes after the tilde for
@@ -199,14 +201,23 @@ impl Highlighter for ShellHelper {
         Cow::Borrowed(prompt)
     }
 
-    /// Syntax-highlight the user's in-progress input: teal command, magenta
-    /// subcommand, light-green flags/parameters, and orange quote characters.
+    /// Syntax-highlight the user's in-progress input: the command word is teal
+    /// when recognised and red when not (fish-style), the subcommand magenta,
+    /// flags/parameters light-green, and quote characters orange.
     fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
         if line.is_empty() {
             Cow::Borrowed(line)
         } else {
-            Cow::Owned(highlight_input(line))
+            Cow::Owned(highlight_input(line, &|cmd| self.command_is_valid(cmd)))
         }
+    }
+
+    /// Render the fish-style autosuggestion (ghost text shown after the
+    /// cursor) in dimmed grey, so it reads as a proposal distinct from the
+    /// text the user has actually typed. Press → / End at end-of-line to
+    /// accept it.
+    fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
+        Cow::Owned(format!("{COLOR_DIM}{hint}{COLOR_RESET}"))
     }
 
     /// Tell rustyline to re-run `highlight` on every keystroke so the color
@@ -222,12 +233,16 @@ impl Highlighter for ShellHelper {
 }
 
 /// Syntax-highlight a command line:
-/// - the first word (the program command) is teal,
+/// - the first word (the program command) is teal when `cmd_valid` accepts it
+///   and red when not (fish-style "unknown command"),
 /// - the first following non-flag word (the subcommand) is magenta,
 /// - words beginning with `-` (flags/parameters) are light green,
 /// - quote characters are orange,
 /// - everything else keeps the base input color.
-fn highlight_input(line: &str) -> String {
+///
+/// `cmd_valid` is passed the (unquoted) first word and reports whether it names
+/// something the shell can run.
+fn highlight_input(line: &str, cmd_valid: &dyn Fn(&str) -> bool) -> String {
     let words = crate::tokenize_words(line);
     let mut out = String::new();
     let mut last = 0;
@@ -239,7 +254,11 @@ fn highlight_input(line: &str) -> String {
 
         let text = &line[start..end];
         let color = if i == 0 {
-            COLOR_TEAL
+            if cmd_valid(unquote(text)) {
+                COLOR_TEAL
+            } else {
+                COLOR_RED
+            }
         } else if text.starts_with('-') {
             COLOR_GREEN
         } else if !subcommand_assigned {
@@ -256,4 +275,33 @@ fn highlight_input(line: &str) -> String {
     // Trailing whitespace, if any.
     out.push_str(&line[last..]);
     out
+}
+
+/// Strip a single pair of matching surrounding quotes (`"`/`'`) from `s`, so a
+/// quoted command like `"my program"` is validated by its inner text. Returns
+/// `s` unchanged when it isn't wrapped in matching quotes.
+fn unquote(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        if (first == b'"' || first == b'\'') && *bytes.last().unwrap() == first {
+            return &s[1..s.len() - 1];
+        }
+    }
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unquote;
+
+    #[test]
+    fn unquote_strips_matching_pairs_only() {
+        assert_eq!(unquote("\"my program\""), "my program");
+        assert_eq!(unquote("'git'"), "git");
+        assert_eq!(unquote("git"), "git");
+        // Mismatched or single quote: left as-is.
+        assert_eq!(unquote("\"git'"), "\"git'");
+        assert_eq!(unquote("\""), "\"");
+    }
 }

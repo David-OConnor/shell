@@ -146,16 +146,14 @@ pub fn save_state(
     }
 
     for rt in remote_terminals {
-        // todo: Storing the password in cleartext alongside the rest of
-        // todo: the state file is obviously not OK long-term — revisit
-        // todo: once we settle on an OS keyring / encryption approach.
+        // Only non-secret connection details go on disk; the password lives in
+        // the OS keyring (see `crate::secrets`). Format is host\tport\tusername.
         let host = sanitize_field(&rt.host);
         let username = sanitize_field(&rt.username);
-        let password = sanitize_field(&rt.password);
         writeln!(
             f,
-            "{REMOTE_TERMINAL_TAG}{}\t{}\t{}\t{}",
-            host, rt.port, username, password
+            "{REMOTE_TERMINAL_TAG}{}\t{}\t{}",
+            host, rt.port, username
         )?;
     }
 
@@ -306,16 +304,19 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
         }
         if let Some(rest) = trimmed.strip_prefix(REMOTE_TERMINAL_TAG) {
             let rest = rest.trim_end_matches('\r');
+            // Current format is host\tport\tusername. Older files appended a 4th
+            // cleartext-password field — we split with `splitn(4, ..)` and simply
+            // ignore any trailing field, so legacy files still load (the stale
+            // password is dropped; the user re-enters it once into the keyring).
             let mut parts = rest.splitn(4, '\t');
-            if let (Some(host), Some(port_str), Some(username), Some(password)) =
-                (parts.next(), parts.next(), parts.next(), parts.next())
+            if let (Some(host), Some(port_str), Some(username)) =
+                (parts.next(), parts.next(), parts.next())
             {
                 if let Ok(port) = port_str.parse::<u16>() {
                     remote_terminals.push(RemoteTerminal {
                         host: host.to_string(),
                         port,
                         username: username.to_string(),
-                        password: password.to_string(),
                     });
                 }
             }

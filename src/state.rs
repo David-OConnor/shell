@@ -6,7 +6,10 @@ use std::{
 
 use chrono::{DateTime, Utc};
 
-use crate::{current_branch, get_home, git::branch_indicator, read_browser_files, save_data};
+use crate::{
+    current_branch, get_home, git::branch_indicator, read_browser_files, save_data,
+    ssh::RemoteSession,
+};
 
 // todo: Instead of storing these Arc<Mutex>>s, perhaps we do it some other way; this is due
 // todo: due to how Rustyline expects it.
@@ -51,6 +54,12 @@ pub struct State {
     /// whenever the user has had a chance to mutate repo state. Only written
     /// by `refresh_branch` and read by `prompt`, both here, so it's private.
     branch: Option<String>,
+    /// The live SSH session, when the user has run `ssh`. While `Some`, typed
+    /// commands are routed to the remote instead of the local shell, and the
+    /// prompt shows `user@host`. Not persisted (a connection can't outlive the
+    /// process) and not behind a lock — only `commands::run_command` touches
+    /// it, so it's crate-private.
+    pub(crate) active_remote: Option<RemoteSession>,
 }
 
 impl Default for State {
@@ -70,6 +79,7 @@ impl Default for State {
             window_size: None,
             open_tabs: OpenTabs::default(),
             branch,
+            active_remote: None,
         }
     }
 }
@@ -81,6 +91,29 @@ impl State {
     /// the prompt grows by ` his N` or ` cd N` before the `$` to indicate
     /// which item is currently loaded into the input.
     pub fn prompt(&self, nav: &NavState) -> String {
+        // When connected to a remote, the prompt reflects the SSH session
+        // (user@host + the tracked remote cwd) so the user always knows their
+        // commands are running elsewhere.
+        if let Some(remote) = &self.active_remote {
+            let cwd = if remote.cwd().is_empty() {
+                "~"
+            } else {
+                remote.cwd()
+            };
+            let mode = match remote.mode() {
+                crate::SshMode::Exec => "",
+                crate::SshMode::Pty => " (pty)",
+            };
+            return format!(
+                "S [{}:{}]{}{}{} $ ",
+                remote.label(),
+                cwd,
+                mode,
+                nav.his_indicator(),
+                nav.cd_indicator(),
+            );
+        }
+
         // Mark the directory with a leading `*` when it's bookmarked.
         let bookmarked = self
             .dir_bookmarks
@@ -176,6 +209,7 @@ impl State {
             window_size: loaded.window_size,
             open_tabs: loaded.open_tabs,
             branch,
+            active_remote: None,
         })
     }
 }
@@ -203,12 +237,14 @@ pub struct BrowserFile {
     pub is_executable: bool,
 }
 
-/// E.g. for SSH
+/// A saved SSH remote. The password is *not* stored here — it lives in the OS
+/// keyring (see `crate::secrets`), keyed by `username@host:port`. This struct
+/// (and the on-disk state file) only ever holds the non-secret connection
+/// details, so the plaintext password problem is gone.
 pub struct RemoteTerminal {
     pub host: String,
-    pub port: u16, // todo: A/R
+    pub port: u16,
     pub username: String,
-    pub password: String, // todo: Determine how to handle this
 }
 
 /// Which optional side panels in the GUI are currently visible. This lives in
@@ -316,47 +352,83 @@ impl NavState {
         std::mem::take(&mut self.draft)
     }
 
-    /// Step the history  axis in response to an Up or
-    /// Down arrow key press. `live_input` is the current input buffer.
+    /// Step the history axis in response to an Up or Down arrow key press.
+    /// `live_input` is the current input buffer.
+    ///
+    /// Fish-style prefix search: whatever the user had typed when recall
+    /// started (the snapshotted `draft`) is treated as a prefix, and only
+    /// history entries beginning with it are walked. An empty draft matches
+    /// every entry, preserving the original "walk all history" behaviour.
+    /// `his_cursor` still stores the absolute index into `history` so the
+    /// ` his N` prompt indicator lines up with `his N` / `hisd N`.
     ///
     /// Returns the text the input box should now show, or `None` when the
-    /// step is a no-op (Down with nothing recalled, Up at the oldest entry,
-    /// empty history).
+    /// step is a no-op (Down with nothing recalled, Up at the oldest match,
+    /// empty history, or no entry matches the prefix).
     pub fn step_his(
         &mut self,
         history: &[HistoryItem],
         up: bool,
         live_input: &str,
     ) -> Option<String> {
-        let len = history.len();
-        if len == 0 {
+        if history.is_empty() {
             return None;
         }
 
-        let new_cursor: Option<usize> = match (self.his_cursor, up) {
+        // The search prefix: the stored draft once recall is active, else the
+        // current live input (captured as the draft on the first step below).
+        let prefix = if self.draft_set {
+            self.draft.clone()
+        } else {
+            live_input.to_string()
+        };
+
+        // Absolute indices of matching entries, oldest → newest.
+        let matches: Vec<usize> = history
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| prefix.is_empty() || item.text.starts_with(&prefix))
+            .map(|(i, _)| i)
+            .collect();
+        if matches.is_empty() {
+            return None;
+        }
+
+        // Where the current cursor sits within `matches` (None ⇒ at the draft).
+        let cur_pos = self
+            .his_cursor
+            .and_then(|abs| matches.iter().position(|&i| i == abs));
+
+        let new_pos: Option<usize> = match (cur_pos, up) {
             (None, true) => {
                 self.ensure_draft(live_input);
                 self.cd_cursor = None;
-                Some(len - 1)
+                Some(matches.len() - 1)
             }
             (None, false) => return None,
             (Some(0), true) => return None,
-            (Some(c), true) => Some(c - 1),
-            (Some(c), false) => {
-                if c + 1 < len {
-                    Some(c + 1)
+            (Some(p), true) => Some(p - 1),
+            (Some(p), false) => {
+                if p + 1 < matches.len() {
+                    Some(p + 1)
                 } else {
                     None
                 }
             }
         };
 
-        let text = match new_cursor {
-            Some(c) => history[c].text.clone(),
-            None => self.pop_draft(),
+        let text = match new_pos {
+            Some(p) => {
+                let abs = matches[p];
+                self.his_cursor = Some(abs);
+                history[abs].text.clone()
+            }
+            None => {
+                self.his_cursor = None;
+                self.pop_draft()
+            }
         };
 
-        self.his_cursor = new_cursor;
         Some(text)
     }
 
@@ -452,5 +524,76 @@ fn nav_indicator(prefix: &str, cursor: Option<usize>) -> String {
     match cursor {
         Some(i) => format!(" {prefix} {i}"),
         None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hist(texts: &[&str]) -> Vec<HistoryItem> {
+        texts
+            .iter()
+            .map(|t| HistoryItem {
+                text: (*t).to_string(),
+                dir: PathBuf::new(),
+                dt: Utc::now(),
+            })
+            .collect()
+    }
+
+    // An empty draft walks the entire history, newest first — the original
+    // pre-prefix-search behaviour.
+    #[test]
+    fn step_his_empty_prefix_walks_all() {
+        let h = hist(&["one", "two", "three"]);
+        let mut nav = NavState::new();
+        assert_eq!(nav.step_his(&h, true, "").as_deref(), Some("three"));
+        assert_eq!(nav.step_his(&h, true, "").as_deref(), Some("two"));
+        assert_eq!(nav.step_his(&h, true, "").as_deref(), Some("one"));
+        // At the oldest entry, Up is a no-op.
+        assert_eq!(nav.step_his(&h, true, ""), None);
+        assert_eq!(nav.his_cursor, Some(0));
+    }
+
+    // With a typed prefix, only matching entries are walked, and the absolute
+    // `his_cursor` index points at the matched entry (for the ` his N` prompt).
+    #[test]
+    fn step_his_prefix_filters() {
+        let h = hist(&["git status", "cargo build", "git commit", "ls"]);
+        let mut nav = NavState::new();
+        // First Up snapshots "git" as the prefix and jumps to the newest match.
+        assert_eq!(nav.step_his(&h, true, "git").as_deref(), Some("git commit"));
+        assert_eq!(nav.his_cursor, Some(2));
+        assert_eq!(nav.step_his(&h, true, "git").as_deref(), Some("git status"));
+        assert_eq!(nav.his_cursor, Some(0));
+        // No older "git" match — no-op.
+        assert_eq!(nav.step_his(&h, true, "git"), None);
+    }
+
+    // Walking back down past the newest match restores the user's draft.
+    #[test]
+    fn step_his_down_restores_draft() {
+        let h = hist(&["git status", "git commit"]);
+        let mut nav = NavState::new();
+        assert_eq!(
+            nav.step_his(&h, true, "git ").as_deref(),
+            Some("git commit")
+        );
+        // Down past the newest match yields the original in-progress draft.
+        assert_eq!(
+            nav.step_his(&h, false, "git commit").as_deref(),
+            Some("git ")
+        );
+        assert_eq!(nav.his_cursor, None);
+    }
+
+    // A prefix matching nothing is a no-op and doesn't start recall.
+    #[test]
+    fn step_his_no_match_is_noop() {
+        let h = hist(&["git status"]);
+        let mut nav = NavState::new();
+        assert_eq!(nav.step_his(&h, true, "zzz"), None);
+        assert_eq!(nav.his_cursor, None);
     }
 }

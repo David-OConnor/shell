@@ -16,9 +16,10 @@ CLI commands, but in 2 dimensions.
 
 Highlights:
 
-- Syntax highlighting
+- Syntax highlighting (unrecognised commands shown in red)
 - Directory bookmarks
-- Intuitive autocomplete
+- Intuitive autocomplete (fuzzy / substring matching)
+- Fish-style autosuggestions and prefix history search
 - Shortcuts for common workflows, e.g. with git.
 
 
@@ -35,7 +36,32 @@ Saving bookmarks
 Type `cd`, then a few characters from the folder name, then press tab to complete the bookmark.
 
 
-## Autocomplete 
+## Autocomplete
+
+### Autosuggestions (fish-style ghost text)
+As you type, Shell shows a dimmed (grey) suggestion after the cursor: the most
+recent command from your history that starts with what you've typed so far.
+Press → (Right arrow) or End — at the end of the line — to accept it; keep
+typing to ignore it. Suggestions draw on your full saved history, not just the
+current session.
+
+### Tab completion
+Tab completes the `cd` argument against your bookmarks first, then directories
+on disk (including nested paths like `code/Bi`). Other commands fall back to
+filename completion in the current directory.
+
+Matching is fuzzy, ranked best-first: an exact prefix wins, then a substring
+match (e.g. `cd ponents` → `components`), then a subsequence/fuzzy match where
+the typed characters appear in order (e.g. `cd cpt` → `components`). Matching is
+case-insensitive throughout.
+
+## Syntax highlighting
+The in-progress input is colored as you type: the command word is teal, the
+subcommand magenta, flags/parameters green, and quote characters orange. The
+command word turns **red** when it isn't recognised — i.e. it's not a built-in,
+not a known shell word, and not an executable found on your PATH (fish-style).
+This is a best-effort heuristic biased toward *not* flagging valid commands, so
+unusual-but-valid commands won't be reddened.
 
 ## Git assistance
 Run `sync` followed by a commit message in quote. Quotes are optional. This runs the following:
@@ -75,12 +101,33 @@ also works on Windows.
 - `bm <number>`: Go to this bookmark (As listed with Alt + B)
 - `cd <part-of-path>` + Tab key: Go to this directory history item
 
+### SSH
+The shell handles `ssh` itself (in-process, via the `russh` library) instead of
+launching the OS's `ssh` client. Passwords are stored in the OS keyring (Windows
+Credential Manager / macOS Keychain / Linux Secret Service), never in the state
+file — so reconnecting to a saved remote needs no re-typing.
+
+- `ssh [user@]host [port]` or `ssh <number>`: Connect to a host, or to a saved
+  remote by its `remote list` index. On first connect you're prompted for a
+  password (entered hidden), which is then saved to the keyring.
+- `remote list`: List saved remotes with their indices.
+- `remote add [user@]host[:port]`: Save a remote (prompts for a password to store).
+- `remote del <number>`: Remove a saved remote (and its keyring password).
+- While connected, typed commands run on the remote. Two modes:
+  - **exec** (default): each command runs and its output is captured.
+  - `mode pty`: an interactive shell (full-screen apps like `vim`/`top` work);
+    Ctrl+] detaches back to exec mode. `mode exec` switches back.
+- `exit` (while connected) disconnects and returns to the local shell.
+
 ## Key commands
 - Enter key: Send input
 - ↑ / ↓: Walk through previously-entered history items (across all directories)
   and load each into the input. Replaces the OS shell's default history
   behavior. A green ` his N` indicator next to the prompt shows the current
-  item — e.g. `S <cwd> his 29 $ ...`.
+  item — e.g. `S <cwd> his 29 $ ...`. Fish-style prefix search: if you've
+  already typed something, ↑ walks only the history entries that start with it
+  (e.g. type `git` then ↑ to step through past `git` commands); with an empty
+  input it walks everything.
 - ← / →: Walk through recent directories. Each step loads `cd <path>` into
   the input and shows a green ` cd N` indicator next to the prompt; Enter
   goes there. Left/Right still move the caret when the input has text and

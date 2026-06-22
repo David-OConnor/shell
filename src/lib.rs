@@ -9,6 +9,8 @@ pub mod commands;
 mod git;
 mod input_completion;
 pub mod save_data;
+pub mod secrets;
+pub mod ssh;
 pub mod state;
 mod util;
 
@@ -16,6 +18,7 @@ pub use git::{BRANCH_PREFIX, current_branch, truncate_branch};
 pub use input_completion::{
     CompletionCandidate, CompletionResult, apply_completion, complete_cd_path,
 };
+pub use ssh::{RemoteSession, SshMode};
 pub use state::{
     BrowserFile, HistoryItem, NavState, OpenTabs, PanelVis, RecentDir, RemoteTerminal, WindowSize,
     record_recent_dir,

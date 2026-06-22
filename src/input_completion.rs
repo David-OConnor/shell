@@ -87,21 +87,22 @@ fn complete_bookmarks(
     home: Option<&Path>,
     bookmarks: &[PathBuf],
 ) -> Vec<CompletionCandidate> {
-    let needle = arg.to_lowercase();
-    bookmarks
+    let mut scored: Vec<(u32, CompletionCandidate)> = bookmarks
         .iter()
         .filter_map(|p| {
             let name = p.file_name()?.to_str()?;
-            if name.to_lowercase().starts_with(&needle) {
-                Some(CompletionCandidate {
+            let score = match_score(arg, name)?;
+            Some((
+                score,
+                CompletionCandidate {
                     display: name.to_string(),
                     replacement: util::render_with_tilde(p, home),
-                })
-            } else {
-                None
-            }
+                },
+            ))
         })
-        .collect()
+        .collect();
+    sort_scored(&mut scored);
+    scored.into_iter().map(|(_, c)| c).collect()
 }
 
 fn complete_dirs(arg: &str, cwd: &Path, home: Option<&Path>) -> Vec<CompletionCandidate> {
@@ -110,28 +111,79 @@ fn complete_dirs(arg: &str, cwd: &Path, home: Option<&Path>) -> Vec<CompletionCa
         Ok(entries) => entries,
         Err(_) => return Vec::new(),
     };
-    let leaf_prefix = leaf_prefix.to_lowercase();
 
-    let mut candidates: Vec<CompletionCandidate> = entries
+    let mut scored: Vec<(u32, CompletionCandidate)> = entries
         .flatten()
         .filter_map(|entry| {
             if !entry.file_type().ok()?.is_dir() {
                 return None;
             }
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.to_lowercase().starts_with(&leaf_prefix) {
-                Some(CompletionCandidate {
+            let score = match_score(leaf_prefix, &name)?;
+            Some((
+                score,
+                CompletionCandidate {
                     display: name.clone(),
                     replacement: format!("{dir_prefix}{name}"),
-                })
-            } else {
-                None
-            }
+                },
+            ))
         })
         .collect();
+    sort_scored(&mut scored);
+    scored.into_iter().map(|(_, c)| c).collect()
+}
 
-    candidates.sort_by(|a, b| a.display.to_lowercase().cmp(&b.display.to_lowercase()));
-    candidates
+/// Score how well candidate `name` matches the typed `needle`, compared
+/// case-insensitively. Lower is better; `None` means no match. Best → worst:
+/// prefix match, then substring (earlier position preferred), then subsequence
+/// (fuzzy — `needle`'s chars appear in order). An empty needle matches
+/// everything with the best score.
+fn match_score(needle: &str, name: &str) -> Option<u32> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    let n = needle.to_lowercase();
+    let h = name.to_lowercase();
+    if h.starts_with(&n) {
+        Some(0)
+    } else if let Some(idx) = h.find(&n) {
+        // +1 keeps every substring match worse than any prefix match; the
+        // position term prefers earlier matches and is capped so a substring
+        // always outranks a pure subsequence (fuzzy) match.
+        Some(1 + (idx as u32).min(SUBSEQ_SCORE - 2))
+    } else if is_subsequence(&n, &h) {
+        Some(SUBSEQ_SCORE)
+    } else {
+        None
+    }
+}
+
+/// Score assigned to a fuzzy (subsequence) match — worse than any prefix or
+/// substring match (see [match_score]).
+const SUBSEQ_SCORE: u32 = 1_000;
+
+/// True when every char of `needle` appears in `haystack` in order — a fuzzy
+/// subsequence match. Both arguments are expected pre-lowercased.
+fn is_subsequence(needle: &str, haystack: &str) -> bool {
+    let mut hay = haystack.chars();
+    'next: for nc in needle.chars() {
+        for hc in hay.by_ref() {
+            if hc == nc {
+                continue 'next;
+            }
+        }
+        return false;
+    }
+    true
+}
+
+/// Sort scored candidates best-first, breaking ties alphabetically by display
+/// name so ordering within a score band is stable and predictable.
+fn sort_scored(scored: &mut [(u32, CompletionCandidate)]) {
+    scored.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.display.to_lowercase().cmp(&b.1.display.to_lowercase()))
+    });
 }
 
 fn completion_base<'a>(
@@ -181,4 +233,47 @@ fn truncate_to_common_prefix(a: &mut String, b: &str) {
         end = a_idx + a_ch.len_utf8();
     }
     a.truncate(end);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn match_score_ranks_prefix_best() {
+        // Prefix beats substring beats subsequence; non-matches are None.
+        let prefix = match_score("co", "components").unwrap();
+        let substring = match_score("po", "components").unwrap();
+        let subseq = match_score("cpt", "components").unwrap();
+        assert!(prefix < substring, "{prefix} !< {substring}");
+        assert!(substring < subseq, "{substring} !< {subseq}");
+        assert_eq!(match_score("xyz", "components"), None);
+    }
+
+    #[test]
+    fn match_score_is_case_insensitive() {
+        assert_eq!(match_score("COMP", "components"), Some(0));
+        assert_eq!(match_score("comp", "COMPONENTS"), Some(0));
+    }
+
+    #[test]
+    fn match_score_empty_needle_matches() {
+        assert_eq!(match_score("", "anything"), Some(0));
+    }
+
+    #[test]
+    fn substring_earlier_position_ranks_better() {
+        // "src" appears at index 0 in "src-utils" and index 4 in "lib-src".
+        let early = match_score("src", "src-utils").unwrap();
+        let late = match_score("src", "lib-src").unwrap();
+        assert_eq!(early, 0); // actually a prefix here
+        assert!(late > 0 && late < SUBSEQ_SCORE);
+    }
+
+    #[test]
+    fn subsequence_matches_in_order_only() {
+        assert!(is_subsequence("abc", "axbycz"));
+        assert!(!is_subsequence("cba", "axbycz"));
+        assert!(is_subsequence("", "anything"));
+    }
 }

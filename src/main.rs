@@ -3,8 +3,10 @@
 //! handling of things that could otherwise be plain functions.
 
 use std::{
+    cell::RefCell,
+    collections::HashMap,
     env, io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -13,7 +15,7 @@ use rustyline::{
     EventHandler, ExternalPrinter, Helper, KeyCode, KeyEvent, Modifiers, RepeatCount,
     completion::{Completer, FilenameCompleter, Pair},
     error::ReadlineError,
-    hint::Hinter,
+    hint::{Hinter, HistoryHinter},
     history::FileHistory,
     validate::Validator,
 };
@@ -59,6 +61,174 @@ struct ShellHelper {
     /// Rustyline's built-in filename completer, used as the fallback when no
     /// bookmark matches (and for non-`cd` commands).
     fs_completer: FilenameCompleter,
+    /// Fish-style autosuggestion source: as the user types, this proposes the
+    /// most recent history entry that starts with the current line. The
+    /// proposal is shown dimmed after the cursor (see `highlight_hint`) and
+    /// accepted with → / End at end-of-line (rustyline's default `CompleteHint`
+    /// binding). Reads the editor's in-memory history, which we seed from the
+    /// persisted history at startup so suggestions span past sessions.
+    hinter: HistoryHinter,
+    /// Memoised command-name → "is this runnable?" results, used by the
+    /// syntax highlighter to colour an unrecognised command red (fish-style).
+    /// Cached because `highlight` re-runs on every keystroke and a PATH probe
+    /// would otherwise repeat for each character of the same word. `RefCell`
+    /// because `Highlighter` only hands us `&self`; the helper lives on the
+    /// single readline thread, so interior mutability is sound here.
+    cmd_cache: RefCell<HashMap<String, bool>>,
+}
+
+/// Built-in commands handled directly by `commands::run_command`, so they're
+/// "valid" even though no executable of that name exists on disk. Keep in sync
+/// with the dispatch there.
+const BUILTINS: &[&str] = &[
+    "exit",
+    "quit",
+    "cd",
+    "bm",
+    "cat",
+    "del",
+    "his",
+    "hist",
+    "hisd",
+    "sync",
+    "logs",
+    "ssh",
+    "remote",
+    "mode",
+    "logout",
+    "disconnect",
+];
+
+/// Common words the pass-through shell understands but which aren't files on
+/// PATH (shell builtins / aliases). Without these, everyday commands would be
+/// wrongly flagged. Heuristic, not exhaustive — we deliberately bias toward
+/// *not* reddening, since a false "invalid" is more annoying than a missed one.
+/// Platform-specific because the pass-through shell differs: pwsh on Windows,
+/// `sh` elsewhere (see `commands::run_command`).
+#[cfg(windows)]
+const SHELL_WORDS: &[&str] = &[
+    "ls", "dir", "gci", "cd", "sl", "chdir", "cls", "clear", "echo", "write", "cat", "gc", "type",
+    "cp", "copy", "cpi", "mv", "move", "mi", "rm", "del", "erase", "rd", "ri", "rmdir", "mkdir",
+    "md", "ni", "pwd", "gl", "ps", "gps", "kill", "spps", "where", "gcm", "man", "help", "select",
+    "sort", "measure", "group", "ft", "fl", "gm", "iex", "icm", "sleep", "start", "saps", "tee",
+    "history", "ghy", "popd", "pushd", "exit",
+];
+#[cfg(not(windows))]
+const SHELL_WORDS: &[&str] = &[
+    "cd", "echo", "pwd", "export", "alias", "unalias", "set", "unset", "source", "eval", "exec",
+    "exit", "read", "test", "true", "false", "type", "command", "hash", "help", "history", "jobs",
+    "fg", "bg", "kill", "wait", "trap", "umask", "ulimit", "shift", "getopts", "local", "return",
+    "declare", "let", "printf", "time", "dirs", "pushd", "popd", "builtin", "enable", "logout",
+];
+
+impl ShellHelper {
+    /// Whether `cmd` (the first word of the input) names something the shell
+    /// can run: one of our built-ins, a known pass-through-shell word, a
+    /// PowerShell `Verb-Noun` cmdlet (Windows), or an executable found on PATH
+    /// / at an explicit path. Drives the red "unknown command" highlight.
+    ///
+    /// Biased toward returning `true` when unsure — see [SHELL_WORDS].
+    fn command_is_valid(&self, cmd: &str) -> bool {
+        if cmd.is_empty() {
+            return false;
+        }
+        let lower = cmd.to_ascii_lowercase();
+        if BUILTINS.contains(&lower.as_str())
+            || SHELL_WORDS.contains(&lower.as_str())
+            || looks_like_cmdlet(cmd)
+        {
+            return true;
+        }
+        if let Some(&hit) = self.cmd_cache.borrow().get(cmd) {
+            return hit;
+        }
+        let found = command_exists(cmd);
+        self.cmd_cache.borrow_mut().insert(cmd.to_string(), found);
+        found
+    }
+}
+
+/// True for a PowerShell-style `Verb-Noun` token (e.g. `Get-ChildItem`). On
+/// Windows we treat these as valid rather than risk reddening a real cmdlet we
+/// don't have an alias for; elsewhere there are no cmdlets, so always false.
+#[cfg(windows)]
+fn looks_like_cmdlet(cmd: &str) -> bool {
+    match cmd.split_once('-') {
+        Some((verb, noun)) => {
+            !verb.is_empty()
+                && !noun.is_empty()
+                && verb.chars().all(|c| c.is_ascii_alphabetic())
+                && noun.chars().all(|c| c.is_ascii_alphanumeric())
+        }
+        None => false,
+    }
+}
+#[cfg(not(windows))]
+fn looks_like_cmdlet(_cmd: &str) -> bool {
+    false
+}
+
+/// True if `cmd` resolves to a runnable executable: an explicit path that
+/// points at one, or a bare name found in a PATH directory.
+fn command_exists(cmd: &str) -> bool {
+    if cmd.contains('/') || cmd.contains('\\') {
+        return path_is_executable(Path::new(cmd));
+    }
+    if let Some(paths) = env::var_os("PATH") {
+        for dir in env::split_paths(&paths) {
+            if dir.as_os_str().is_empty() {
+                continue;
+            }
+            if path_is_executable(&dir.join(cmd)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Windows: a path is "executable" if it's a file as-given, or becomes one
+/// once a PATHEXT extension (`.EXE`, `.CMD`, …) is appended — matching how the
+/// OS resolves bare command names.
+#[cfg(windows)]
+fn path_is_executable(base: &Path) -> bool {
+    use std::ffi::OsString;
+    if base.is_file() {
+        return true;
+    }
+    let exts = env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    for ext in exts.split(';') {
+        let ext = ext.trim();
+        if ext.is_empty() {
+            continue;
+        }
+        let mut candidate: OsString = base.as_os_str().to_owned();
+        if !ext.starts_with('.') {
+            candidate.push(".");
+        }
+        candidate.push(ext);
+        if Path::new(&candidate).is_file() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Unix: a path is "executable" if it's a regular file with any execute bit set.
+#[cfg(unix)]
+fn path_is_executable(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::metadata(p) {
+        Ok(m) => m.is_file() && m.permissions().mode() & 0o111 != 0,
+        Err(_) => false,
+    }
+}
+
+/// Fallback for platforms that are neither Windows nor Unix: best-effort
+/// file-existence check.
+#[cfg(not(any(windows, unix)))]
+fn path_is_executable(p: &Path) -> bool {
+    p.is_file()
 }
 
 impl Completer for ShellHelper {
@@ -100,6 +270,13 @@ impl Completer for ShellHelper {
 
 impl Hinter for ShellHelper {
     type Hint = String;
+
+    /// Delegate to the `HistoryHinter`, which returns the tail of the most
+    /// recent history entry starting with `line` (or `None`). This drives the
+    /// fish-style ghost-text autosuggestion.
+    fn hint(&self, line: &str, pos: usize, ctx: &Context<'_>) -> Option<String> {
+        self.hinter.hint(line, pos, ctx)
+    }
 }
 
 /// Split a line into word ranges (byte start, byte end), treating quoted
@@ -356,7 +533,21 @@ fn main() {
         bookmarks: state.dir_bookmarks.clone(),
         home: home.clone(),
         fs_completer: FilenameCompleter::new(),
+        hinter: HistoryHinter::new(),
+        cmd_cache: RefCell::new(HashMap::new()),
     }));
+
+    // Seed rustyline's in-memory history from our persisted history (oldest
+    // first, so the newest ends up most-recent). The autosuggestion hinter and
+    // any rustyline-side search read from this list, so without seeding,
+    // ghost-text suggestions would only draw on commands typed in the current
+    // session. Our own ↑/↓ recall reads `state.history` directly and is
+    // unaffected.
+    if let Ok(history) = state.history.lock() {
+        for item in history.iter() {
+            let _ = rl.add_history_entry(&item.text);
+        }
+    }
 
     // Shared printer so key handlers can write messages above the in-progress
     // prompt without corrupting rustyline's display state.
@@ -515,5 +706,30 @@ fn main() {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn looks_like_cmdlet_matches_verb_noun() {
+        use super::looks_like_cmdlet;
+        assert!(looks_like_cmdlet("Get-ChildItem"));
+        assert!(looks_like_cmdlet("set-location"));
+        // Not Verb-Noun shape.
+        assert!(!looks_like_cmdlet("git"));
+        assert!(!looks_like_cmdlet("-flag"));
+        assert!(!looks_like_cmdlet("a-"));
+        assert!(!looks_like_cmdlet("git-flow-init")); // noun has a hyphen
+    }
+
+    #[test]
+    fn builtins_recognised() {
+        for b in super::BUILTINS {
+            assert!(!b.is_empty());
+        }
+        assert!(super::BUILTINS.contains(&"sync"));
+        assert!(super::BUILTINS.contains(&"cd"));
     }
 }

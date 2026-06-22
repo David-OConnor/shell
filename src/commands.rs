@@ -23,7 +23,11 @@ use std::{
 
 use chrono::Utc;
 
-use crate::{HistoryItem, path_from_args, state::State};
+use crate::{
+    HistoryItem, RemoteTerminal, path_from_args, secrets, ssh,
+    ssh::{RemoteSession, SshMode},
+    state::State,
+};
 
 /// Which stream a chunk of output came from. Frontends use this to colour
 /// the line (stderr red, stdout default) and/or pick between stdout/stderr
@@ -300,8 +304,42 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
         eprintln!("warning: failed to save state: {e}");
     }
 
+    // While an SSH session is live, typed commands run on the remote rather
+    // than locally. Only the session-management keywords are intercepted here;
+    // everything else (including `cd`, `ls`, …) is sent to the remote shell.
+    if state.active_remote.is_some() {
+        match cmd {
+            "exit" | "quit" | "logout" | "disconnect" => {
+                if let Some(session) = state.active_remote.take() {
+                    session.disconnect();
+                }
+                println!("ssh: disconnected");
+            }
+            "mode" => remote_set_mode(state, args),
+            _ => {
+                let mut sink = |kind, msg: String| {
+                    let msg = msg.trim_end_matches('\n');
+                    match kind {
+                        OutKind::Stdout => println!("{msg}"),
+                        OutKind::Stderr => eprintln!("{msg}"),
+                    }
+                };
+                if let Some(session) = state.active_remote.as_mut() {
+                    if let Err(e) = session.run(input, &mut sink) {
+                        eprintln!("ssh: {e}");
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
     match cmd {
         "exit" | "quit" => return false,
+
+        "ssh" => cmd_ssh(state, state_path, args),
+
+        "remote" => cmd_remote(state, state_path, args),
 
         "sync" => {
             // Delegate to the shared implementation; route its sink output
@@ -491,4 +529,400 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
     }
 
     true
+}
+
+// ---------------------------------------------------------------------------
+// SSH built-ins (CLI side). The actual transport lives in `crate::ssh`; these
+// functions just parse arguments, fetch/store passwords in the OS keyring
+// (`crate::secrets`), and drive the connection from the CLI.
+// ---------------------------------------------------------------------------
+
+/// The OS account name, used as the default SSH username when the user writes
+/// just `ssh host` (no `user@`).
+fn default_user() -> String {
+    std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "root".to_string())
+}
+
+/// Split `args` into its first whitespace-delimited word and the trimmed rest.
+fn split_first_word(args: &str) -> (&str, &str) {
+    match args.find(char::is_whitespace) {
+        Some(i) => (&args[..i], args[i..].trim()),
+        None => (args, ""),
+    }
+}
+
+/// Parse a `[user@]host[:port] [port]` spec into `(host, port, user)`. The
+/// optional trailing port argument wins over a `:port` suffix. Defaults: user =
+/// the OS account, port = 22.
+fn parse_remote_spec(spec: &str) -> (String, u16, String) {
+    let (target, rest) = split_first_word(spec);
+    let port_arg = rest.split_whitespace().next().and_then(|p| p.parse().ok());
+
+    let (user, hostport) = match target.split_once('@') {
+        Some((u, hp)) => (u.to_string(), hp),
+        None => (default_user(), target),
+    };
+    let (host, port) = match hostport.split_once(':') {
+        Some((h, p)) => (h.to_string(), p.parse().unwrap_or(22)),
+        None => (hostport.to_string(), 22),
+    };
+    (host, port_arg.unwrap_or(port), user)
+}
+
+/// Resolve the argument to `ssh` into a concrete `(host, port, user)`: either a
+/// saved-remote index, or a freeform `[user@]host[:port]` spec. Prints a usage
+/// / error message and returns `None` on failure.
+fn resolve_ssh_target(state: &State, args: &str) -> Option<(String, u16, String)> {
+    let args = args.trim();
+    if args.is_empty() {
+        eprintln!("ssh: usage: ssh [user@]host [port]  |  ssh <saved-index>  (see `remote list`)");
+        return None;
+    }
+    // A bare number selects a saved remote by its `remote list` index.
+    if let Ok(idx) = args.parse::<usize>() {
+        let resolved = state.remote_terminals.lock().ok().and_then(|l| {
+            l.get(idx)
+                .map(|r| (r.host.clone(), r.port, r.username.clone()))
+        });
+        if resolved.is_none() {
+            eprintln!("ssh: no saved remote at index {idx} (see `remote list`)");
+        }
+        return resolved;
+    }
+    Some(parse_remote_spec(args))
+}
+
+/// Dedupe-record a remote into the saved list (newest last), mirroring
+/// `record_recent_dir`.
+fn record_remote(state: &State, host: &str, port: u16, user: &str) {
+    if let Ok(mut list) = state.remote_terminals.lock() {
+        list.retain(|r| !(r.host == host && r.port == port && r.username == user));
+        list.push(RemoteTerminal {
+            host: host.to_string(),
+            port,
+            username: user.to_string(),
+        });
+    }
+}
+
+/// `ssh [user@]host [port]` / `ssh <index>` — connect and enter a remote
+/// session. The password comes from the keyring if saved; otherwise we prompt
+/// (hidden) and save it for next time.
+fn cmd_ssh(state: &mut State, state_path: &Path, args: &str) {
+    let Some((host, port, user)) = resolve_ssh_target(state, args) else {
+        return;
+    };
+
+    let password = match secrets::get_password(&host, port, &user) {
+        Some(p) => p,
+        None => match read_password(&format!("Password for {user}@{host}: ")) {
+            Ok(p) => {
+                // Save for next time so future connects need no prompt.
+                if let Err(e) = secrets::set_password(&host, port, &user, &p) {
+                    eprintln!("ssh: warning: couldn't save password to keyring: {e}");
+                }
+                p
+            }
+            Err(e) => {
+                eprintln!("ssh: {e}");
+                return;
+            }
+        },
+    };
+
+    println!("Connecting to {user}@{host}:{port} …");
+    match ssh::connect(&host, port, &user, &password) {
+        Ok(session) => {
+            println!(
+                "Connected. `exit` disconnects; `mode pty` opens an interactive shell, `mode exec` returns."
+            );
+            record_remote(state, &host, port, &user);
+            if let Err(e) = state.save(state_path) {
+                eprintln!("warning: failed to save state: {e}");
+            }
+            state.active_remote = Some(session);
+        }
+        Err(e) => eprintln!("ssh: {e}"),
+    }
+}
+
+/// `remote list | add <[user@]host[:port]> | del <index>` — manage saved
+/// remotes and their keyring passwords.
+fn cmd_remote(state: &mut State, state_path: &Path, args: &str) {
+    let (sub, rest) = split_first_word(args);
+    match sub {
+        "" | "list" | "ls" => {
+            let Ok(list) = state.remote_terminals.lock() else {
+                eprintln!("remote: list lock poisoned");
+                return;
+            };
+            if list.is_empty() {
+                println!("remote: no saved remotes (add one with `remote add user@host`)");
+                return;
+            }
+            for (i, r) in list.iter().enumerate() {
+                println!("{i}: {}@{}:{}", r.username, r.host, r.port);
+            }
+        }
+        "add" => {
+            if rest.is_empty() {
+                eprintln!("remote: usage: remote add [user@]host[:port] [port]");
+                return;
+            }
+            let (host, port, user) = parse_remote_spec(rest);
+            match read_password(&format!("Password for {user}@{host} (blank to skip): ")) {
+                Ok(pw) if !pw.is_empty() => {
+                    if let Err(e) = secrets::set_password(&host, port, &user, &pw) {
+                        eprintln!("remote: warning: couldn't save password to keyring: {e}");
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("remote: {e}");
+                    return;
+                }
+            }
+            record_remote(state, &host, port, &user);
+            if let Err(e) = state.save(state_path) {
+                eprintln!("remote: failed to save state: {e}");
+            }
+            println!("Saved remote {user}@{host}:{port}");
+        }
+        "del" | "rm" | "remove" => match rest.parse::<usize>() {
+            Ok(idx) => {
+                let removed = match state.remote_terminals.lock() {
+                    Ok(mut list) if idx < list.len() => Some(list.remove(idx)),
+                    Ok(_) => {
+                        eprintln!("remote: no saved remote at index {idx}");
+                        None
+                    }
+                    Err(_) => {
+                        eprintln!("remote: list lock poisoned");
+                        None
+                    }
+                };
+                if let Some(r) = removed {
+                    let _ = secrets::delete_password(&r.host, r.port, &r.username);
+                    if let Err(e) = state.save(state_path) {
+                        eprintln!("remote: failed to save state: {e}");
+                    }
+                    println!("Removed remote {}@{}:{}", r.username, r.host, r.port);
+                }
+            }
+            Err(_) => eprintln!("remote: usage: remote del <index>"),
+        },
+        other => {
+            eprintln!("remote: unknown subcommand `{other}` (expected list/add/del)");
+        }
+    }
+}
+
+/// `mode exec|pty` while connected: switch the live session's interaction mode.
+/// Entering PTY mode runs the raw-terminal interactive loop until the remote
+/// shell exits (then we disconnect) or the user detaches with Ctrl+] (then we
+/// return to exec mode, keeping the connection).
+fn remote_set_mode(state: &mut State, args: &str) {
+    let target = match args.trim() {
+        "pty" | "interactive" | "shell" => SshMode::Pty,
+        "exec" | "cmd" | "" => SshMode::Exec,
+        other => {
+            eprintln!("mode: expected `exec` or `pty`, got `{other}`");
+            return;
+        }
+    };
+
+    if target == SshMode::Exec {
+        if let Some(session) = state.active_remote.as_mut() {
+            if let Err(e) = session.set_mode(SshMode::Exec) {
+                eprintln!("mode: {e}");
+            }
+        }
+        return;
+    }
+
+    // Entering PTY mode: open the shell channel, then drive the interactive loop.
+    if let Some(session) = state.active_remote.as_mut() {
+        if let Err(e) = session.set_mode(SshMode::Pty) {
+            eprintln!("mode: {e}");
+            return;
+        }
+        println!("-- interactive shell (Ctrl+] to detach) --");
+        if let Err(e) = cli_pty_loop(session) {
+            eprintln!("mode: pty: {e}");
+        }
+    }
+
+    // The loop ended: either the remote shell exited (disconnect entirely) or
+    // the user detached (drop back to exec mode, keeping the connection).
+    let closed = state
+        .active_remote
+        .as_ref()
+        .map(|s| s.pty_closed())
+        .unwrap_or(false);
+    if closed {
+        if let Some(session) = state.active_remote.take() {
+            session.disconnect();
+        }
+        println!("ssh: remote shell exited; disconnected");
+    } else if let Some(session) = state.active_remote.as_mut() {
+        let _ = session.set_mode(SshMode::Exec);
+    }
+}
+
+/// Translate a crossterm key event into the bytes to feed the remote PTY.
+/// Covers printable chars, Ctrl-letters, and the common navigation/edit keys.
+fn key_to_bytes(key: crossterm::event::KeyEvent) -> Option<Vec<u8>> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Char(c) => {
+            if ctrl {
+                let upper = c.to_ascii_uppercase();
+                if upper.is_ascii_alphabetic() {
+                    return Some(vec![upper as u8 - b'A' + 1]);
+                }
+                match c {
+                    ' ' => return Some(vec![0]),
+                    '\\' => return Some(vec![0x1c]),
+                    _ => {}
+                }
+            }
+            let mut buf = [0u8; 4];
+            Some(c.encode_utf8(&mut buf).as_bytes().to_vec())
+        }
+        KeyCode::Enter => Some(vec![b'\r']),
+        KeyCode::Backspace => Some(vec![0x7f]),
+        KeyCode::Tab => Some(vec![b'\t']),
+        KeyCode::Esc => Some(vec![0x1b]),
+        KeyCode::Up => Some(b"\x1b[A".to_vec()),
+        KeyCode::Down => Some(b"\x1b[B".to_vec()),
+        KeyCode::Right => Some(b"\x1b[C".to_vec()),
+        KeyCode::Left => Some(b"\x1b[D".to_vec()),
+        KeyCode::Home => Some(b"\x1b[H".to_vec()),
+        KeyCode::End => Some(b"\x1b[F".to_vec()),
+        KeyCode::Delete => Some(b"\x1b[3~".to_vec()),
+        KeyCode::PageUp => Some(b"\x1b[5~".to_vec()),
+        KeyCode::PageDown => Some(b"\x1b[6~".to_vec()),
+        _ => None,
+    }
+}
+
+/// Raw-terminal interactive loop for PTY mode. Puts the terminal into raw mode,
+/// pumps keystrokes to the remote and remote output to stdout, and returns when
+/// the remote shell closes or the user presses Ctrl+] to detach. Always
+/// restores cooked mode on the way out.
+fn cli_pty_loop(session: &mut RemoteSession) -> io::Result<()> {
+    use std::io::Write;
+
+    use crossterm::{
+        event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+        terminal,
+    };
+
+    terminal::enable_raw_mode()?;
+    if let Ok((cols, rows)) = terminal::size() {
+        let _ = session.window_change(cols as u32, rows as u32);
+    }
+
+    // Inner closure so we can always disable raw mode afterwards, even on error.
+    let pump = || -> io::Result<()> {
+        let mut stdout = io::stdout();
+        loop {
+            if session.pty_closed() {
+                break;
+            }
+            let out = session.drain_output();
+            if !out.is_empty() {
+                stdout.write_all(&out)?;
+                stdout.flush()?;
+            }
+            // Short poll so we keep draining output even while idle.
+            if event::poll(std::time::Duration::from_millis(10))? {
+                match event::read()? {
+                    Event::Key(key) if key.kind != KeyEventKind::Release => {
+                        // Ctrl+] detaches back to exec mode without closing the shell.
+                        if key.modifiers.contains(KeyModifiers::CONTROL)
+                            && key.code == KeyCode::Char(']')
+                        {
+                            break;
+                        }
+                        if let Some(bytes) = key_to_bytes(key) {
+                            session.send(&bytes)?;
+                        }
+                    }
+                    Event::Resize(cols, rows) => {
+                        let _ = session.window_change(cols as u32, rows as u32);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    };
+
+    let result = pump();
+    terminal::disable_raw_mode()?;
+
+    // Flush any trailing output produced after the loop broke.
+    let out = session.drain_output();
+    if !out.is_empty() {
+        let mut stdout = io::stdout();
+        let _ = stdout.write_all(&out);
+        let _ = stdout.flush();
+    }
+    println!();
+    result
+}
+
+/// Prompt for a password on the CLI without echoing it. Uses crossterm raw mode
+/// to read characters silently; Enter finishes, Esc / Ctrl+C aborts.
+fn read_password(prompt: &str) -> io::Result<String> {
+    use std::io::Write;
+
+    use crossterm::{
+        event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+        terminal,
+    };
+
+    print!("{prompt}");
+    io::stdout().flush()?;
+
+    terminal::enable_raw_mode()?;
+    let mut pw = String::new();
+    let mut read = || -> io::Result<bool> {
+        loop {
+            if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Release {
+                    continue;
+                }
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                    return Ok(false); // aborted
+                }
+                match key.code {
+                    KeyCode::Enter => return Ok(true),
+                    KeyCode::Esc => return Ok(false),
+                    KeyCode::Backspace => {
+                        pw.pop();
+                    }
+                    KeyCode::Char(c) => pw.push(c),
+                    _ => {}
+                }
+            }
+        }
+    };
+    let finished = read();
+    terminal::disable_raw_mode()?;
+    println!();
+
+    match finished {
+        Ok(true) => Ok(pw),
+        Ok(false) => Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "password entry cancelled",
+        )),
+        Err(e) => Err(e),
+    }
 }
