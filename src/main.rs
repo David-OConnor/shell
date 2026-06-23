@@ -35,8 +35,8 @@ const HIS_PREFIX: &str = " his ";
 const CD_PREFIX: &str = " cd ";
 // Re-exported from the shell lib so render.rs and the prompt builder use
 // exactly the same string (`" branch: "`).
-pub use shell::BRANCH_PREFIX;
 use shell::state::State;
+pub use shell::{BRANCH_PREFIX, VENV_PREFIX};
 
 use crate::key_handling::ArrowHandler;
 

@@ -6,12 +6,12 @@ Making the terminal application I want to use.
 
 ## What this is
 
-A terminal application; automates the problems I have trouble with OS-provided ones. Good autocomplete. Knowledge of what folders are commonly used. Less typing. Syntax highlighting. First-class SSH support. 
+A terminal application with improvements over the native ones it wraps. Good autocomplete. Knowledge of what folders are commonly used. Less typing. Syntax highlighting. First-class SSH support. Convenience functions for git repos and python virtual environments.
 
 Compatible with Windows, Linux, and Mac. Windows users need to have Powershell 7 or higher installed.
 
 This is not a shell scripting language like bash or powershell: It wraps the existing terminal you 
-launch it from (Like one of those two), but adds convenience feature. In this sense, it differs from `zsh`, `fish` etc: These are both full scripting/execution systems, and provide convenience functionality. This program provides the latter only.
+launch it from. In this sense, it differs from `zsh`, `fish` etc: These are full scripting/execution systems, in addition to improved an improved UI. This program provides the latter only.
 
 For a GUI version which has correspondingly more features, see [shell-gui](https://github.com/David-OConnor/shell-gui).
 
@@ -50,7 +50,7 @@ Matching is fuzzy, ranked best-first: an exact prefix wins, then a substring mat
 
 
 ## Syntax highlighting
-The in-progress input is colored as you type: the command word is teal, the subcommand magenta, flags/parameters green, and quote characters orange. The command word turns **red** when it isn't recognised — i.e. it's not a built-in, not a known shell word, and not an executable found on your PATH (fish-style). This is a best-effort heuristic biased toward *not* flagging valid commands, so unusual-but-valid commands won't be reddened.
+The in-progress input is colored as you type: the command word is teal, the subcommand magenta, flags/parameters green, and quote characters orange. The command word turns **red** when it isn't recognized — i.e. it's not a built-in, not a known shell word, and not an executable found on your PATH.
 
 
 ## Git assistance
@@ -66,6 +66,7 @@ sync "A commit message"
 
 sync A commit message
 ```
+
 Warning: This isn't suitable for all workflows. If you use git in a way where it isn't appropriate to sync all gitignored files, this may have unintended consequences!
 
 
@@ -87,9 +88,10 @@ Run `logs <service>`, to view the recent Journalctl logs. Linux only. For exampl
 - `hisd <number>`: Execute a command from history, in its original working dir.
 - `cat`: Displays the contents of a (generally text) file. Similar to the standard Linux operation, but
 also works on Windows.
-- `cd <number>`: Go to this recent directory (As listed with Ctrl + R)
+- `cd <number>`: Go to this recent directory (As listed with Ctrl + R). Or bookmark.
 - `bm <number>`: Go to this bookmark (As listed with Alt + B)
 - `cd <part-of-path>` + Tab key: Go to this directory history item
+
 
 ### SSH
 The shell handles `ssh` itself (in-process, via the `russh` library) instead of launching the OS's `ssh` client. Passwords are stored in the OS keyring (Windows Credential Manager / macOS Keychain / Linux Secret Service), never in the state file — so reconnecting to a saved remote needs no re-typing.
@@ -117,6 +119,7 @@ The shell handles `ssh` itself (in-process, via the `russh` library) instead of 
   goes there. Left/Right still move the caret when the input has text and
   no cd recall is active.
 - Tab key: while using with cd, autocompletes, including to bookmarks.
+
 
 
 ### Recent or frequent commands

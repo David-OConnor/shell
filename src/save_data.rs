@@ -3,10 +3,13 @@
 //! terminals, but the file format is line-based and tagged so we can add
 //! more record types later without breaking existing files.
 //!
-//! HISTORY and REMOTE_TERMINAL use TAB as a field separator (rather than
-//! space like RECENT_DIR) because the trailing fields can contain spaces.
+//! HIS and REMOTE_TERMINAL use TAB as a field separator (rather than
+//! space like REC_DIR) because the trailing fields can contain spaces.
 //! Newlines in the command text are flattened to spaces on save so each
 //! entry stays on one line.
+//!
+//! Timestamps are written as second-precision RFC 3339 (e.g.
+//! `2026-06-23T13:41:32Z`) to keep rows compact.
 //!
 //! Unknown record types are silently skipped on load so older builds reading
 //! a file written by a newer build don't choke.
@@ -22,15 +25,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 
 use crate::state::{HistoryItem, OpenTabs, PanelVis, RecentDir, RemoteTerminal, WindowSize};
 
 pub const FILENAME: &str = "shell_state.ss";
 
-const BOOKMARK_TAG: &str = "BOOKMARK ";
-const RECENT_DIR_TAG: &str = "RECENT_DIR ";
-const HISTORY_TAG: &str = "HISTORY ";
+const BOOKMARK_TAG: &str = "BM ";
+const RECENT_DIR_TAG: &str = "REC_DIR ";
+const HISTORY_TAG: &str = "HIS ";
 const REMOTE_TERMINAL_TAG: &str = "REMOTE_TERMINAL ";
 const PANEL_VIS_TAG: &str = "PANEL_VIS ";
 const WINDOW_SIZE_TAG: &str = "WINDOW_SIZE ";
@@ -94,11 +97,11 @@ pub fn save_state(
 
     for r in recent_dirs {
         // "<rfc3339> <path>" — rfc3339 has no spaces, so the path can be the
-        // (possibly space-containing) tail.
+        // (possibly space-containing) tail. Second precision keeps it compact.
         writeln!(
             f,
             "{RECENT_DIR_TAG}{} {}",
-            r.dt.to_rfc3339(),
+            r.dt.to_rfc3339_opts(SecondsFormat::Secs, true),
             r.path.display()
         )?;
     }
@@ -111,7 +114,7 @@ pub fn save_state(
         writeln!(
             f,
             "{HISTORY_TAG}{}\t{}\t{}",
-            h.dt.to_rfc3339(),
+            h.dt.to_rfc3339_opts(SecondsFormat::Secs, true),
             h.dir.display(),
             text
         )?;

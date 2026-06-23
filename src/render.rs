@@ -9,7 +9,9 @@ use std::{
 use rustyline::highlight::Highlighter;
 use shell::{HistoryItem, RecentDir};
 
-use crate::{BRANCH_PREFIX, CD_PREFIX, DISP_HIST_LEN, DIVIDER, HIS_PREFIX, ShellHelper};
+use crate::{
+    BRANCH_PREFIX, CD_PREFIX, DISP_HIST_LEN, DIVIDER, HIS_PREFIX, ShellHelper, VENV_PREFIX,
+};
 
 // ANSI escape codes. Modern Windows consoles (Windows Terminal, pwsh, post-2019
 // conhost) handle these natively; rustyline enables VT processing on startup.
@@ -148,10 +150,10 @@ pub fn render_bookmarks(bookmarks: &[PathBuf], home: Option<&Path>, page: usize)
 impl Highlighter for ShellHelper {
     /// Color the `S` and `$` accents in the prompt yellow, leaving the
     /// directory in its default terminal color. The prompt may carry a
-    /// ` branch: NAME` segment (magenta) and at most one recall indicator
-    /// (` his N` / ` cd N`, light green) between the cwd and the `$`.
-    /// Prompt shape from `State::prompt` is
-    /// `"S <cwd>[ branch: NAME][ his N][ cd N] $ "`.
+    /// ` branch: NAME` segment (magenta), a ` venv` marker (blue), and at most
+    /// one recall indicator (` his N` / ` cd N`, light green) between the cwd
+    /// and the `$`. Prompt shape from `State::prompt` is
+    /// `"S <cwd>[ branch: NAME][ venv][ his N][ cd N] $ "`.
     fn highlight_prompt<'b, 's: 'b, 'p: 'b>(
         &'s self,
         prompt: &'p str,
@@ -179,13 +181,24 @@ impl Highlighter for ShellHelper {
                     None => (body, None),
                 };
 
-                let (dir, branch) = match before_indicator.rfind(BRANCH_PREFIX) {
-                    Some(i) => (&before_indicator[..i], Some(&before_indicator[i + 1..])),
+                // The venv marker carries no value, so an exact-suffix strip is
+                // precise — no need for the right-search the branch slot uses.
+                let (before_venv, venv) = match before_indicator.strip_suffix(VENV_PREFIX) {
+                    Some(rest) => (rest, Some(VENV_PREFIX.trim_start())),
                     None => (before_indicator, None),
+                };
+
+                let (dir, branch) = match before_venv.rfind(BRANCH_PREFIX) {
+                    Some(i) => (&before_venv[..i], Some(&before_venv[i + 1..])),
+                    None => (before_venv, None),
                 };
 
                 let branch_part = match branch {
                     Some(b) => format!(" {COLOR_MAGENTA}{b}{COLOR_RESET}"),
+                    None => String::new(),
+                };
+                let venv_part = match venv {
+                    Some(v) => format!(" {COLOR_BLUE}{v}{COLOR_RESET}"),
                     None => String::new(),
                 };
                 let indicator_part = match indicator {
@@ -194,7 +207,7 @@ impl Highlighter for ShellHelper {
                 };
 
                 return Cow::Owned(format!(
-                    "{COLOR_YELLOW}S{COLOR_RESET} {dir}{branch_part}{indicator_part} {COLOR_YELLOW}${COLOR_RESET} {tail}"
+                    "{COLOR_YELLOW}S{COLOR_RESET} {dir}{branch_part}{venv_part}{indicator_part} {COLOR_YELLOW}${COLOR_RESET} {tail}"
                 ));
             }
         }

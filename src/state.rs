@@ -122,9 +122,10 @@ impl State {
             .unwrap_or(false);
         let star = if bookmarked { "*" } else { "" };
         format!(
-            "S {star}{}{}{}{} $ ",
+            "S {star}{}{}{}{}{} $ ",
             self.cwd.display(),
             branch_indicator(self.branch.as_deref()),
+            crate::python::venv_indicator(&self.cwd),
             nav.his_indicator(),
             nav.cd_indicator(),
         )

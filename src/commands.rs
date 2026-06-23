@@ -110,7 +110,9 @@ fn remote_sync_command(message: &str, sink: OutputSink) -> Option<String> {
     // Single-quote the message so spaces/specials survive the remote shell;
     // escape any embedded single quotes the usual `'\''` way.
     let escaped = message.replace('\'', "'\\''");
-    Some(format!("git add . && git commit -am '{escaped}' && git push"))
+    Some(format!(
+        "git add . && git commit -am '{escaped}' && git push"
+    ))
 }
 
 /// Used for our `log` command: wrapper around `sudo journalctl -u <service> -f
@@ -221,9 +223,7 @@ fn remote_logs_command(service: &str, sink: OutputSink) -> Option<String> {
     }
     // Single-quote the unit name so it survives the remote shell intact.
     let escaped = service.replace('\'', "'\\''");
-    Some(format!(
-        "sudo journalctl -u '{escaped}' -n 200 --no-pager"
-    ))
+    Some(format!("sudo journalctl -u '{escaped}' -n 200 --no-pager"))
 }
 
 /// Like the Linux cat command; outputs the contents of a file to stdout.
@@ -570,28 +570,64 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
             Err(_) => eprintln!("bm: usage: bm <number>"),
         },
 
+        // `python` (or `python3`): when the current directory holds a virtual
+        // environment, run that venv's interpreter instead of whatever `python`
+        // resolves to on PATH. Falls through to the normal passthrough when
+        // there's no venv, so the system python still works as before.
+        "python" | "python3" => match crate::python::venv_python(&state.cwd) {
+            Some(interpreter) => run_passthrough(&rewrite_venv_command(&interpreter, args)),
+            None => run_passthrough(input),
+        },
+
+        // `pip` (or `pip3`): same idea as `python` above — when the cwd holds a
+        // venv, run that venv's `pip` so installs land in the environment rather
+        // than the system site-packages. Falls through otherwise.
+        "pip" | "pip3" => match crate::python::venv_pip(&state.cwd) {
+            Some(pip) => run_passthrough(&rewrite_venv_command(&pip, args)),
+            None => run_passthrough(input),
+        },
+
         // Everything else: Pass through to the system shell (e.g. the one which we launched this
         // application from)
-        _ => {
-            let result = if cfg!(windows) {
-                // Powershell 7+; we will assume Windows users have this.
-                // -NoProfile/-NoLogo skip loading the user's $PROFILE and the
-                // startup banner, which together dominate pwsh's cold-start
-                // time. Each command spawns a fresh process, so this shaves
-                // ~200ms off every passthrough command.
-                Command::new("pwsh")
-                    .args(["-NoProfile", "-NoLogo", "-Command", input])
-                    .status()
-            } else {
-                Command::new("sh").args(["-c", input]).status()
-            };
-            if let Err(e) = result {
-                eprintln!("shell: {e}");
-            }
-        }
+        _ => run_passthrough(input),
     }
 
     true
+}
+
+/// Run a command line through the system shell (PowerShell 7+ on Windows, `sh`
+/// elsewhere), inheriting stdio so interactive programs work. Used for the
+/// catch-all passthrough and the venv-rewritten `python` invocation.
+///
+/// `-NoProfile`/`-NoLogo` skip loading the user's `$PROFILE` and the startup
+/// banner, which together dominate pwsh's cold-start time. Each command spawns a
+/// fresh process, so this shaves ~200ms off every passthrough command.
+fn run_passthrough(line: &str) {
+    let result = if cfg!(windows) {
+        Command::new("pwsh")
+            .args(["-NoProfile", "-NoLogo", "-Command", line])
+            .status()
+    } else {
+        Command::new("sh").args(["-c", line]).status()
+    };
+    if let Err(e) = result {
+        eprintln!("shell: {e}");
+    }
+}
+
+/// Rewrite a `python`/`pip` invocation to run a specific venv `exe` executable,
+/// keeping the user's original arguments. The path is single-quoted so spaces
+/// in it survive the system shell; on Windows the pwsh call operator `&` is
+/// required to launch a quoted executable path.
+fn rewrite_venv_command(exe: &Path, args: &str) -> String {
+    let exe = exe.display();
+    let args = args.trim();
+    let lead = if cfg!(windows) { "& " } else { "" };
+    if args.is_empty() {
+        format!("{lead}'{exe}'")
+    } else {
+        format!("{lead}'{exe}' {args}")
+    }
 }
 
 // ---------------------------------------------------------------------------
