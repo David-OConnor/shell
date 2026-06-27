@@ -1,11 +1,37 @@
 //! Misc utility functionality.
 
 use std::{
-    env, fs,
+    env,
+    ffi::OsStr,
+    fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use crate::state::BrowserFile;
+
+/// Build a [`Command`] that won't make Windows allocate a console window for
+/// the child. Use this for any process whose output we capture (`.output()`)
+/// or that runs detached — **not** for an interactive child that needs to
+/// share the terminal, since `CREATE_NO_WINDOW` denies it a console.
+///
+/// Why it matters: the `shell_gui` frontend is built `windows_subsystem =
+/// "windows"`, so it has no console of its own. When such a process spawns a
+/// console program (e.g. `git`, `pwsh`), Windows spins up a fresh `conhost.exe`
+/// for each spawn — a multi-hundred-ms stall that shows up as a per-command
+/// lag (and a flashing console window). `CREATE_NO_WINDOW` skips that entirely.
+/// On non-Windows this is just `Command::new`.
+pub fn quiet_command<S: AsRef<OsStr>>(program: S) -> Command {
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
 
 /// Resolve a `cd`/`cat`-style path argument against the shell's state:
 /// expands `~`/`~/...` to the home dir, treats real paths literally, and

@@ -21,7 +21,7 @@ use rustyline::{
 };
 use shell::{
     NavState, OpenTabs, PanelVis, RemoteTerminal, WindowSize, commands, complete_cd_path,
-    save_data,
+    complete_command_path, save_data,
     state::{HistoryItem, RecentDir},
 };
 
@@ -263,6 +263,26 @@ impl Completer for ShellHelper {
         }
         drop(bookmarks);
 
+        // Explicit paths (`./script.sh`, `../bin/foo`, `~/...`) complete against
+        // files as well as directories, so `./install_` + Tab fills in the
+        // script name. rustyline's filename completer doesn't handle these as
+        // the command word, so do it ourselves first.
+        if let Ok(cwd) = env::current_dir() {
+            if let Some(result) = complete_command_path(line, pos, &cwd, self.home.as_deref()) {
+                if !result.candidates.is_empty() {
+                    let pairs = result
+                        .candidates
+                        .into_iter()
+                        .map(|candidate| Pair {
+                            display: candidate.display,
+                            replacement: candidate.replacement,
+                        })
+                        .collect();
+                    return Ok((result.start, pairs));
+                }
+            }
+        }
+
         // Default: complete files & directories in the CWD (bash-style).
         self.fs_completer.complete(line, pos, ctx)
     }
@@ -346,6 +366,11 @@ struct BookmarkHandler {
     open_tabs: OpenTabs,
     save_path: PathBuf,
     printer: SharedPrinter,
+    /// Shared recall state. After adding a bookmark we stash the current input
+    /// here and bail via `Cmd::Interrupt` so the main loop rebuilds the prompt
+    /// with the `*` marker immediately (rustyline can't change a prompt
+    /// mid-line — same trick the arrow handlers use).
+    nav: Arc<Mutex<CliNav>>,
 }
 
 impl ConditionalEventHandler for BookmarkHandler {
@@ -354,8 +379,9 @@ impl ConditionalEventHandler for BookmarkHandler {
         _evt: &Event,
         _n: RepeatCount,
         _positive: bool,
-        _ctx: &EventContext<'_>,
+        ctx: &EventContext<'_>,
     ) -> Option<Cmd> {
+        let mut added = false;
         if let Ok(cwd) = env::current_dir() {
             if let Ok(mut list) = self.bookmarks.lock() {
                 let msg = if list.contains(&cwd) {
@@ -363,6 +389,7 @@ impl ConditionalEventHandler for BookmarkHandler {
                 } else {
                     let msg = format!("Added a bookmark: {}\n", cwd.display());
                     list.push(cwd);
+                    added = true;
                     // Lock recent_dirs, history, remote_terminals after
                     // bookmarks — same order as State::save, so no
                     // lock-order conflicts.
@@ -389,6 +416,16 @@ impl ConditionalEventHandler for BookmarkHandler {
                 if let Ok(mut p) = self.printer.lock() {
                     let _ = p.print(msg);
                 }
+            }
+        }
+
+        // A newly added bookmark changes the prompt's `*` marker. Stash the
+        // current input and interrupt so the main loop redraws the prompt with
+        // the star straight away, restoring what the user had typed.
+        if added {
+            if let Ok(mut nav) = self.nav.lock() {
+                nav.pending_restart = Some(ctx.line().to_string());
+                return Some(Cmd::Interrupt);
             }
         }
 
@@ -559,6 +596,10 @@ fn main() {
         }
     };
 
+    // Shared recall state for the arrow-key handlers and the bookmark handler;
+    // declared here so the Ctrl+B binding below can clone it.
+    let hist_nav = Arc::new(Mutex::new(CliNav::new()));
+
     // Ctrl + B:  push the CWD onto state.dir_bookmarks (and persist to disk).
     rl.bind_sequence(
         KeyEvent::new('b', Modifiers::CTRL),
@@ -567,6 +608,7 @@ fn main() {
             recent_dirs: state.recent_dirs.clone(),
             history: state.history.clone(),
             remote_terminals: state.remote_terminals.clone(),
+            nav: hist_nav.clone(),
             panel_vis: state.panel_vis,
             window_size: state.window_size,
             open_tabs: state.open_tabs.clone(),
@@ -619,7 +661,6 @@ fn main() {
     // All four bail out via Cmd::Interrupt so the main loop can rebuild the
     // prompt with a `his N` / `cd N` indicator (rustyline can't change a
     // prompt mid-line).
-    let hist_nav = Arc::new(Mutex::new(CliNav::new()));
     let bind_arrow = |axis: NavAxis, backward: bool| ArrowHandler {
         history: state.history.clone(),
         recent_dirs: state.recent_dirs.clone(),

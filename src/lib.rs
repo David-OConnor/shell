@@ -18,6 +18,7 @@ mod util;
 pub use git::{BRANCH_PREFIX, current_branch, truncate_branch};
 pub use input_completion::{
     CompletionCandidate, CompletionResult, apply_completion, complete_cd_path,
+    complete_command_path,
 };
 pub use python::{VENV_PREFIX, venv_python};
 pub use ssh::{RemoteSession, SshMode};
@@ -25,4 +26,4 @@ pub use state::{
     BrowserFile, HistoryItem, NavState, OpenTabs, PanelVis, RecentDir, RemoteTerminal, WindowSize,
     record_recent_dir,
 };
-pub use util::{get_home, path_from_args, read_browser_files};
+pub use util::{get_home, path_from_args, quiet_command, read_browser_files};

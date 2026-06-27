@@ -1,5 +1,5 @@
 # Shell
-Making the terminal application I want to use.
+Making the terminal application I want to use. CLI or GUI.
 
 [![Docs](https://docs.rs/dynamics/badge.svg)](https://www.athanorlab.com/docs)
 

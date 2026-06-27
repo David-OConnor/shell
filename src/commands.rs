@@ -24,7 +24,7 @@ use std::{
 use chrono::Utc;
 
 use crate::{
-    HistoryItem, RemoteTerminal, path_from_args, secrets, ssh,
+    HistoryItem, RemoteTerminal, path_from_args, quiet_command, secrets, ssh,
     ssh::{RemoteSession, SshMode},
     state::State,
 };
@@ -63,7 +63,7 @@ pub fn sync(message: &str, cwd: &Path, sink: OutputSink) {
 
     let steps: [&[&str]; 3] = [&["add", "."], &["commit", "-am", message], &["push"]];
     for step in steps {
-        match Command::new("git").args(step).current_dir(cwd).output() {
+        match quiet_command("git").args(step).current_dir(cwd).output() {
             Ok(out) => {
                 if !out.stdout.is_empty() {
                     sink(

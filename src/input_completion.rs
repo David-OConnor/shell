@@ -105,7 +105,72 @@ fn complete_bookmarks(
     scored.into_iter().map(|(_, c)| c).collect()
 }
 
+/// Complete a command (or argument) written as an explicit path — one starting
+/// with `./`, `../`, `~/`, a path separator, or a Windows drive (e.g.
+/// `./install_` → `./install_program.sh`). Unlike [complete_cd_path] this
+/// matches files as well as directories, so scripts and executables complete.
+/// Returns `None` when the word under the cursor isn't such a path.
+pub fn complete_command_path(
+    line: &str,
+    pos: usize,
+    cwd: &Path,
+    home: Option<&Path>,
+) -> Option<CompletionResult> {
+    if pos > line.len() || !line.is_char_boundary(pos) {
+        return None;
+    }
+
+    let before = &line[..pos];
+    let trimmed = before.trim_start();
+    let leading = before.len() - trimmed.len();
+
+    // Complete only the whitespace-delimited word the cursor sits at the end of.
+    let word_offset = trimmed
+        .rfind(char::is_whitespace)
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let word = &trimmed[word_offset..];
+    let word_start = leading + word_offset;
+
+    if !is_explicit_path(word) {
+        return None;
+    }
+
+    Some(CompletionResult {
+        start: word_start,
+        candidates: complete_paths(word, cwd, home, false),
+    })
+}
+
+/// True when `word` is written as an explicit filesystem path rather than a
+/// bare command name resolved against `PATH`.
+fn is_explicit_path(word: &str) -> bool {
+    const PREFIXES: [&str; 8] = ["./", ".\\", "../", "..\\", "~/", "~\\", "/", "\\"];
+    if PREFIXES.iter().any(|p| word.starts_with(p)) {
+        return true;
+    }
+    // Windows drive-qualified path, e.g. `C:\` or `C:/`.
+    let bytes = word.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'/' || bytes[2] == b'\\')
+}
+
 fn complete_dirs(arg: &str, cwd: &Path, home: Option<&Path>) -> Vec<CompletionCandidate> {
+    complete_paths(arg, cwd, home, true)
+}
+
+/// Complete the leaf of `arg` against the directory it points into. When
+/// `dirs_only` is set only subdirectories are offered (used by `cd`); otherwise
+/// files are offered too and directory names get a trailing `/` so completing
+/// into a subdirectory continues naturally.
+fn complete_paths(
+    arg: &str,
+    cwd: &Path,
+    home: Option<&Path>,
+    dirs_only: bool,
+) -> Vec<CompletionCandidate> {
     let (dir_prefix, base_dir, leaf_prefix) = completion_base(arg, cwd, home);
     let entries = match fs::read_dir(base_dir) {
         Ok(entries) => entries,
@@ -115,16 +180,20 @@ fn complete_dirs(arg: &str, cwd: &Path, home: Option<&Path>) -> Vec<CompletionCa
     let mut scored: Vec<(u32, CompletionCandidate)> = entries
         .flatten()
         .filter_map(|entry| {
-            if !entry.file_type().ok()?.is_dir() {
+            let is_dir = entry.file_type().ok()?.is_dir();
+            if dirs_only && !is_dir {
                 return None;
             }
             let name = entry.file_name().to_string_lossy().into_owned();
             let score = match_score(leaf_prefix, &name)?;
+            // `cd` keeps its bare-name display; file completion marks dirs with
+            // a trailing slash in both the shown name and the replacement.
+            let suffix = if is_dir && !dirs_only { "/" } else { "" };
             Some((
                 score,
                 CompletionCandidate {
-                    display: name.clone(),
-                    replacement: format!("{dir_prefix}{name}"),
+                    display: format!("{name}{suffix}"),
+                    replacement: format!("{dir_prefix}{name}{suffix}"),
                 },
             ))
         })
@@ -275,5 +344,44 @@ mod tests {
         assert!(is_subsequence("abc", "axbycz"));
         assert!(!is_subsequence("cba", "axbycz"));
         assert!(is_subsequence("", "anything"));
+    }
+
+    #[test]
+    fn is_explicit_path_recognizes_path_words() {
+        for w in ["./foo", ".\\foo", "../foo", "..\\foo", "~/foo", "/etc", "\\foo"] {
+            assert!(is_explicit_path(w), "{w} should be a path");
+        }
+        assert!(is_explicit_path("C:\\Users"));
+        assert!(is_explicit_path("D:/data"));
+        for w in ["ls", "install.sh", "git", "foo.bar", ""] {
+            assert!(!is_explicit_path(w), "{w} should not be a path");
+        }
+    }
+
+    #[test]
+    fn complete_command_path_completes_files_in_cwd() {
+        let dir = std::env::temp_dir().join(format!("shell_cc_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("install_program.sh"), "").unwrap();
+        fs::create_dir_all(dir.join("install_data")).unwrap();
+        fs::write(dir.join("other.txt"), "").unwrap();
+
+        let line = "./install_";
+        let res = complete_command_path(line, line.len(), &dir, None).unwrap();
+        assert_eq!(res.start, 0);
+        let repls: Vec<_> = res.candidates.iter().map(|c| c.replacement.as_str()).collect();
+        assert!(repls.contains(&"./install_program.sh"), "{repls:?}");
+        assert!(repls.contains(&"./install_data/"), "{repls:?}");
+        assert!(!repls.iter().any(|r| r.contains("other")), "{repls:?}");
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn complete_command_path_ignores_bare_commands() {
+        let cwd = std::env::temp_dir();
+        assert!(complete_command_path("install_", 8, &cwd, None).is_none());
+        assert!(complete_command_path("ls -la", 6, &cwd, None).is_none());
     }
 }

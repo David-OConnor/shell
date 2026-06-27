@@ -1,7 +1,9 @@
 //! Basic git integration: For `sync`, and displaying info about the current branch
 //! if in a folder which contains a repo.
 
-use std::{path::Path, process::Command};
+use std::path::Path;
+
+use crate::quiet_command;
 
 /// Maximum number of branch-name characters shown in the prompt before we
 /// truncate with `...`. Only used by `branch_indicator` below; the GUI passes
@@ -22,7 +24,7 @@ pub const BRANCH_PREFIX: &str = " branch: ";
 /// For a detached HEAD this returns `Some("HEAD")` — the caller decides
 /// whether to display that as-is or replace it with a short SHA.
 pub fn current_branch(cwd: &Path) -> Option<String> {
-    let output = Command::new("git")
+    let output = quiet_command("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(cwd)
         .output()
