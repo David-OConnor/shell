@@ -1,9 +1,6 @@
 # Shell
 The terminal application I want to use. CLI or GUI.
 
-[![Docs](https://docs.rs/dynamics/badge.svg)](https://www.athanorlab.com/docs)
-
-
 ## What this is
 
 A terminal application with improvements over the native ones it wraps. Good autocomplete. Knowledge of what folders are commonly used. Less typing. Syntax highlighting. First-class SSH support. Convenience functions for git repos and python virtual environments.
