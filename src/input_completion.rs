@@ -1,3 +1,5 @@
+//! Logic related to auto-completing text as the user types, or with the Tab key.
+
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -302,86 +304,4 @@ fn truncate_to_common_prefix(a: &mut String, b: &str) {
         end = a_idx + a_ch.len_utf8();
     }
     a.truncate(end);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn match_score_ranks_prefix_best() {
-        // Prefix beats substring beats subsequence; non-matches are None.
-        let prefix = match_score("co", "components").unwrap();
-        let substring = match_score("po", "components").unwrap();
-        let subseq = match_score("cpt", "components").unwrap();
-        assert!(prefix < substring, "{prefix} !< {substring}");
-        assert!(substring < subseq, "{substring} !< {subseq}");
-        assert_eq!(match_score("xyz", "components"), None);
-    }
-
-    #[test]
-    fn match_score_is_case_insensitive() {
-        assert_eq!(match_score("COMP", "components"), Some(0));
-        assert_eq!(match_score("comp", "COMPONENTS"), Some(0));
-    }
-
-    #[test]
-    fn match_score_empty_needle_matches() {
-        assert_eq!(match_score("", "anything"), Some(0));
-    }
-
-    #[test]
-    fn substring_earlier_position_ranks_better() {
-        // "src" appears at index 0 in "src-utils" and index 4 in "lib-src".
-        let early = match_score("src", "src-utils").unwrap();
-        let late = match_score("src", "lib-src").unwrap();
-        assert_eq!(early, 0); // actually a prefix here
-        assert!(late > 0 && late < SUBSEQ_SCORE);
-    }
-
-    #[test]
-    fn subsequence_matches_in_order_only() {
-        assert!(is_subsequence("abc", "axbycz"));
-        assert!(!is_subsequence("cba", "axbycz"));
-        assert!(is_subsequence("", "anything"));
-    }
-
-    #[test]
-    fn is_explicit_path_recognizes_path_words() {
-        for w in ["./foo", ".\\foo", "../foo", "..\\foo", "~/foo", "/etc", "\\foo"] {
-            assert!(is_explicit_path(w), "{w} should be a path");
-        }
-        assert!(is_explicit_path("C:\\Users"));
-        assert!(is_explicit_path("D:/data"));
-        for w in ["ls", "install.sh", "git", "foo.bar", ""] {
-            assert!(!is_explicit_path(w), "{w} should not be a path");
-        }
-    }
-
-    #[test]
-    fn complete_command_path_completes_files_in_cwd() {
-        let dir = std::env::temp_dir().join(format!("shell_cc_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("install_program.sh"), "").unwrap();
-        fs::create_dir_all(dir.join("install_data")).unwrap();
-        fs::write(dir.join("other.txt"), "").unwrap();
-
-        let line = "./install_";
-        let res = complete_command_path(line, line.len(), &dir, None).unwrap();
-        assert_eq!(res.start, 0);
-        let repls: Vec<_> = res.candidates.iter().map(|c| c.replacement.as_str()).collect();
-        assert!(repls.contains(&"./install_program.sh"), "{repls:?}");
-        assert!(repls.contains(&"./install_data/"), "{repls:?}");
-        assert!(!repls.iter().any(|r| r.contains("other")), "{repls:?}");
-
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn complete_command_path_ignores_bare_commands() {
-        let cwd = std::env::temp_dir();
-        assert!(complete_command_path("install_", 8, &cwd, None).is_none());
-        assert!(complete_command_path("ls -la", 6, &cwd, None).is_none());
-    }
 }

@@ -1,16 +1,12 @@
 //! This .lib entry point exists so we can share code (native to this project) with
-//! the GUI variant. It is not part of the CLI shell application.
+//! the GUI variant, which calls this as a library. It is not part of the CLI shell application, and
+//! this distinction would not exist if this project was only used for the [CLI] executable.
 
-// `commands`, `save_data`, and `state` are accessed by path (e.g.
-// `shell::state::State`) from the CLI binary and/or `shell_gui`, so they stay
-// `pub mod`. `git`, `input_completion`, and `util` are only ever reached
-// through the flat re-exports below, so the modules themselves are private.
 pub mod commands;
 mod git;
 mod input_completion;
 mod python;
 pub mod save_data;
-pub mod secrets;
 pub mod ssh;
 pub mod state;
 mod util;

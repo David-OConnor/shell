@@ -1,5 +1,5 @@
 # Shell
-Making the terminal application I want to use. CLI or GUI.
+The terminal application I want to use. CLI or GUI.
 
 [![Docs](https://docs.rs/dynamics/badge.svg)](https://www.athanorlab.com/docs)
 
@@ -23,6 +23,8 @@ Highlights:
 - Fish-style autosuggestions and prefix history search
 - Shortcuts for common workflows, e.g. with git.
 
+![Example history](/screenshots/his_example_0.png)
+
 
 ## Example use
 
@@ -34,10 +36,13 @@ Saving bookmarks
 
 #### Loading bookmarks
 
+![Example bookmarks and ssh](/screenshots/bm_example_0.png)
+
 Type `cd`, then a few characters from the folder name, then press tab to complete the bookmark.
 
-
 ## Autocomplete
+
+![Example bookmarks and ssh](/screenshots/recent_dir_example_0.png)
 
 ### Autosuggestions (fish-style ghost text)
 As you type, Shell shows a dimmed (grey) suggestion after the cursor: the most recent command from your history that starts with what you've typed so far. Press → (Right arrow) or End — at the end of the line — to accept it; keep typing to ignore it. Suggestions draw on your full saved history, not just the current session.
@@ -88,12 +93,15 @@ Run `logs <service>`, to view the recent Journalctl logs. Linux only. For exampl
 - `hisd <number>`: Execute a command from history, in its original working dir.
 - `cat`: Displays the contents of a (generally text) file. Similar to the standard Linux operation, but
 also works on Windows.
-- `cd <number>`: Go to this recent directory (As listed with Ctrl + R). Or bookmark.
+- `cd <number>`: Go to this recent directory (As listed with Ctrl + R). For bookmarks, use `bm <number>`.
 - `bm <number>`: Go to this bookmark (As listed with Alt + B)
 - `cd <part-of-path>` + Tab key: Go to this directory history item
 
 
 ### SSH
+
+![Example bookmarks and ssh](/screenshots/ssh_example_0.png)
+
 The shell handles `ssh` itself (in-process, via the `russh` library) instead of launching the OS's `ssh` client. Passwords are stored in the OS keyring (Windows Credential Manager / macOS Keychain / Linux Secret Service), never in the state file — so reconnecting to a saved remote needs no re-typing.
 
 - `ssh [user@]host [port]` or `ssh <number>`: Connect to a host, or to a saved

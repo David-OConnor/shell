@@ -10,18 +10,14 @@ use shell::state::{HistoryItem, RecentDir};
 
 use crate::{CliNav, NavAxis, render};
 
-/// Rustyline key handler bound to one of the four arrow keys. On a
-/// successful step it stores the new buffer text in `pending_restart` and
-/// returns `Cmd::Interrupt` so the main loop can tear the prompt down and
-/// re-call `readline_with_initial` with an updated prompt that includes
-/// the matching ` his N` or ` cd N` indicator.
+/// Rustyline key handler bound to one of the four arrow keys.
 pub(crate) struct ArrowHandler {
     pub(crate) history: Arc<Mutex<Vec<HistoryItem>>>,
     pub(crate) recent_dirs: Arc<Mutex<Vec<RecentDir>>>,
     pub(crate) home: Option<PathBuf>,
     pub(crate) nav: Arc<Mutex<CliNav>>,
     pub(crate) axis: NavAxis,
-    /// Direction: Up / Left ⇒ `true` (older); Down / Right ⇒ `false`.
+    /// Direction: Up / Left: `true` (older); Down / Right:`false`.
     pub(crate) backward: bool,
 }
 

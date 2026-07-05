@@ -1,7 +1,7 @@
-//! Persistent application state. Currently the user's bookmark list plus
+//! Persistent application state. Includes the bookmark list,
 //! the recent-directories list, command history, and saved remote
-//! terminals, but the file format is line-based and tagged so we can add
-//! more record types later without breaking existing files.
+//! terminals. A simple text format; easy to add new functionality without
+//! breaking existing files.
 //!
 //! HIS and REMOTE_TERMINAL use TAB as a field separator (rather than
 //! space like REC_DIR) because the trailing fields can contain spaces.
@@ -10,9 +10,6 @@
 //!
 //! Timestamps are written as second-precision RFC 3339 (e.g.
 //! `2026-06-23T13:41:32Z`) to keep rows compact.
-//!
-//! Unknown record types are silently skipped on load so older builds reading
-//! a file written by a newer build don't choke.
 //!
 //! Both the CLI and GUI crates call into this module with plain slices /
 //! `Vec`s — neither one re-implements the parsing or formatting. The CLI
@@ -39,6 +36,7 @@ const PANEL_VIS_TAG: &str = "PANEL_VIS ";
 const WINDOW_SIZE_TAG: &str = "WINDOW_SIZE ";
 const OPEN_TAB_TAG: &str = "OPEN_TAB ";
 const ACTIVE_TAB_TAG: &str = "ACTIVE_TAB ";
+const FONT_SIZE_TAG: &str = "FONT_SIZE ";
 
 /// Bundle of everything `load_state` returns. Lets callers destructure
 /// in one step and lets us grow the format without churning every call
@@ -57,6 +55,10 @@ pub struct LoadedState {
     /// is empty when the file has no `OPEN_TAB` lines (predates the feature
     /// or a CLI-only file), in which case the GUI opens a single default tab.
     pub open_tabs: OpenTabs,
+    /// GUI terminal-pane font size, in points. `None` when the file has no
+    /// `FONT_SIZE` line (predates the feature, or a CLI-only save), in which
+    /// case the GUI falls back to its default size.
+    pub font_size: Option<f32>,
 }
 
 /// Where the state file lives by default: `<home>/shell_state.ss`. Falls back
@@ -77,6 +79,7 @@ pub fn save_state(
     panel_vis: &PanelVis,
     window_size: Option<WindowSize>,
     open_tabs: &OpenTabs,
+    font_size: Option<f32>,
     path: &Path,
 ) -> io::Result<()> {
     if let Some(parent) = path.parent() {
@@ -96,8 +99,6 @@ pub fn save_state(
     }
 
     for r in recent_dirs {
-        // "<rfc3339> <path>" — rfc3339 has no spaces, so the path can be the
-        // (possibly space-containing) tail. Second precision keeps it compact.
         writeln!(
             f,
             "{RECENT_DIR_TAG}{} {}",
@@ -108,8 +109,6 @@ pub fn save_state(
 
     for h in history {
         // Flatten any newlines so each history entry is one line on disk.
-        // (We split on '\t' to recover fields; tabs in user input are rare
-        // enough that we just drop them rather than escape.)
         let text = h.text.replace(['\r', '\n'], " ").replace('\t', " ");
         writeln!(
             f,
@@ -134,18 +133,24 @@ pub fn save_state(
         bool_to_int(panel_vis.file_browser),
     )?;
 
-    // WindowSize: GUI-only. Written only when present so a CLI-side save
+    // GUI-only. Written only when present so a CLI-side save
     // (which passes `None`) preserves whatever the GUI last recorded.
     if let Some(ws) = window_size {
         writeln!(f, "{WINDOW_SIZE_TAG}x={} y={}", ws.x, ws.y)?;
     }
 
-    // OpenTabs: GUI-only.
+    // GUI-only.
     if !open_tabs.paths.is_empty() {
         for path in &open_tabs.paths {
             writeln!(f, "{OPEN_TAB_TAG}{}", path.display())?;
         }
         writeln!(f, "{ACTIVE_TAB_TAG}{}", open_tabs.active)?;
+    }
+
+    // FontSize: GUI-only. Like WINDOW_SIZE, written only when present so a
+    // CLI-side save (which passes `None`) preserves whatever the GUI recorded.
+    if let Some(size) = font_size {
+        writeln!(f, "{FONT_SIZE_TAG}size={}", size)?;
     }
 
     for rt in remote_terminals {
@@ -186,6 +191,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
                 panel_vis: PanelVis::default(),
                 window_size: None,
                 open_tabs: OpenTabs::default(),
+                font_size: None,
             });
         }
         Err(e) => return Err(e),
@@ -198,6 +204,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
     let mut panel_vis = PanelVis::default();
     let mut window_size = None;
     let mut open_tabs = OpenTabs::default();
+    let mut font_size = None;
 
     for line in BufReader::new(file).lines() {
         let line = line?;
@@ -305,12 +312,27 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
             }
             continue;
         }
+        if let Some(rest) = trimmed.strip_prefix(FONT_SIZE_TAG) {
+            // Parse `size=<points>`. Only adopt a positive, finite value — a
+            // malformed or degenerate entry leaves `font_size` at `None` so the
+            // GUI uses its default rather than a zero-height font.
+            for pair in rest.trim_end().split_whitespace() {
+                let Some((k, v)) = pair.split_once('=') else {
+                    continue;
+                };
+                if k == "size" {
+                    if let Ok(s) = v.parse::<f32>() {
+                        if s.is_finite() && s > 0.0 {
+                            font_size = Some(s);
+                        }
+                    }
+                }
+            }
+            continue;
+        }
         if let Some(rest) = trimmed.strip_prefix(REMOTE_TERMINAL_TAG) {
             let rest = rest.trim_end_matches('\r');
-            // Current format is host\tport\tusername. Older files appended a 4th
-            // cleartext-password field — we split with `splitn(4, ..)` and simply
-            // ignore any trailing field, so legacy files still load (the stale
-            // password is dropped; the user re-enters it once into the keyring).
+
             let mut parts = rest.splitn(4, '\t');
             if let (Some(host), Some(port_str), Some(username)) =
                 (parts.next(), parts.next(), parts.next())
@@ -335,5 +357,6 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
         panel_vis,
         window_size,
         open_tabs,
+        font_size,
     })
 }

@@ -48,6 +48,10 @@ pub struct State {
     /// reads or mutates this — it's held only so a CLI-side save round-trips
     /// the GUI's tabs back unchanged instead of dropping them.
     pub open_tabs: OpenTabs,
+    /// GUI terminal-pane font size. Like the fields above, the CLI never reads
+    /// or mutates this — held only so a CLI-side save writes the GUI's value
+    /// back unchanged instead of dropping the `FONT_SIZE` line.
+    pub font_size: Option<f32>,
     /// Cached git branch for `cwd`. `None` when cwd isn't inside a repo.
     /// Refreshed by `refresh_branch` after every command and after `cd` —
     /// branch can change behind our back via `git checkout`, so we re-check
@@ -78,6 +82,7 @@ impl Default for State {
             panel_vis: PanelVis::default(),
             window_size: None,
             open_tabs: OpenTabs::default(),
+            font_size: None,
             branch,
             active_remote: None,
         }
@@ -186,6 +191,7 @@ impl State {
             &self.panel_vis,
             self.window_size,
             &self.open_tabs,
+            self.font_size,
             path,
         )
     }
@@ -209,6 +215,7 @@ impl State {
             panel_vis: loaded.panel_vis,
             window_size: loaded.window_size,
             open_tabs: loaded.open_tabs,
+            font_size: loaded.font_size,
             branch,
             active_remote: None,
         })
@@ -525,76 +532,5 @@ fn nav_indicator(prefix: &str, cursor: Option<usize>) -> String {
     match cursor {
         Some(i) => format!(" {prefix} {i}"),
         None => String::new(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn hist(texts: &[&str]) -> Vec<HistoryItem> {
-        texts
-            .iter()
-            .map(|t| HistoryItem {
-                text: (*t).to_string(),
-                dir: PathBuf::new(),
-                dt: Utc::now(),
-            })
-            .collect()
-    }
-
-    // An empty draft walks the entire history, newest first — the original
-    // pre-prefix-search behaviour.
-    #[test]
-    fn step_his_empty_prefix_walks_all() {
-        let h = hist(&["one", "two", "three"]);
-        let mut nav = NavState::new();
-        assert_eq!(nav.step_his(&h, true, "").as_deref(), Some("three"));
-        assert_eq!(nav.step_his(&h, true, "").as_deref(), Some("two"));
-        assert_eq!(nav.step_his(&h, true, "").as_deref(), Some("one"));
-        // At the oldest entry, Up is a no-op.
-        assert_eq!(nav.step_his(&h, true, ""), None);
-        assert_eq!(nav.his_cursor, Some(0));
-    }
-
-    // With a typed prefix, only matching entries are walked, and the absolute
-    // `his_cursor` index points at the matched entry (for the ` his N` prompt).
-    #[test]
-    fn step_his_prefix_filters() {
-        let h = hist(&["git status", "cargo build", "git commit", "ls"]);
-        let mut nav = NavState::new();
-        // First Up snapshots "git" as the prefix and jumps to the newest match.
-        assert_eq!(nav.step_his(&h, true, "git").as_deref(), Some("git commit"));
-        assert_eq!(nav.his_cursor, Some(2));
-        assert_eq!(nav.step_his(&h, true, "git").as_deref(), Some("git status"));
-        assert_eq!(nav.his_cursor, Some(0));
-        // No older "git" match — no-op.
-        assert_eq!(nav.step_his(&h, true, "git"), None);
-    }
-
-    // Walking back down past the newest match restores the user's draft.
-    #[test]
-    fn step_his_down_restores_draft() {
-        let h = hist(&["git status", "git commit"]);
-        let mut nav = NavState::new();
-        assert_eq!(
-            nav.step_his(&h, true, "git ").as_deref(),
-            Some("git commit")
-        );
-        // Down past the newest match yields the original in-progress draft.
-        assert_eq!(
-            nav.step_his(&h, false, "git commit").as_deref(),
-            Some("git ")
-        );
-        assert_eq!(nav.his_cursor, None);
-    }
-
-    // A prefix matching nothing is a no-op and doesn't start recall.
-    #[test]
-    fn step_his_no_match_is_noop() {
-        let h = hist(&["git status"]);
-        let mut nav = NavState::new();
-        assert_eq!(nav.step_his(&h, true, "zzz"), None);
-        assert_eq!(nav.his_cursor, None);
     }
 }

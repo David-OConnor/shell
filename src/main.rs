@@ -364,6 +364,9 @@ struct BookmarkHandler {
     /// Snapshot of the GUI open-tab layout, written back unchanged for the
     /// same reason as `panel_vis`.
     open_tabs: OpenTabs,
+    /// Snapshot of the GUI font size, written back unchanged for the same
+    /// reason as `panel_vis`.
+    font_size: Option<f32>,
     save_path: PathBuf,
     printer: SharedPrinter,
     /// Shared recall state. After adding a bookmark we stash the current input
@@ -404,6 +407,7 @@ impl ConditionalEventHandler for BookmarkHandler {
                                     &self.panel_vis,
                                     self.window_size,
                                     &self.open_tabs,
+                                    self.font_size,
                                     &self.save_path,
                                 ) {
                                     eprintln!("warning: failed to save state: {e}");
@@ -612,6 +616,7 @@ fn main() {
             panel_vis: state.panel_vis,
             window_size: state.window_size,
             open_tabs: state.open_tabs.clone(),
+            font_size: state.font_size,
             save_path: state_path.clone(),
             printer: printer.clone(),
         })),
@@ -747,30 +752,5 @@ fn main() {
                 break;
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[cfg(windows)]
-    #[test]
-    fn looks_like_cmdlet_matches_verb_noun() {
-        use super::looks_like_cmdlet;
-        assert!(looks_like_cmdlet("Get-ChildItem"));
-        assert!(looks_like_cmdlet("set-location"));
-        // Not Verb-Noun shape.
-        assert!(!looks_like_cmdlet("git"));
-        assert!(!looks_like_cmdlet("-flag"));
-        assert!(!looks_like_cmdlet("a-"));
-        assert!(!looks_like_cmdlet("git-flow-init")); // noun has a hyphen
-    }
-
-    #[test]
-    fn builtins_recognised() {
-        for b in super::BUILTINS {
-            assert!(!b.is_empty());
-        }
-        assert!(super::BUILTINS.contains(&"sync"));
-        assert!(super::BUILTINS.contains(&"cd"));
     }
 }

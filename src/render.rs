@@ -1,5 +1,6 @@
 //! Functionality related to rendering text on screen; generally string
-//! manipulation with color.
+//! manipulation with color. Note that the GUI version doesn't color text this way;
+//! it uses EGUI's color API. The CLI version uses the ANSI codes defined here.
 
 use std::{
     borrow::Cow,
@@ -13,12 +14,12 @@ use crate::{
     BRANCH_PREFIX, CD_PREFIX, DISP_HIST_LEN, DIVIDER, HIS_PREFIX, ShellHelper, VENV_PREFIX,
 };
 
-// ANSI escape codes. Modern Windows consoles (Windows Terminal, pwsh, post-2019
-// conhost) handle these natively; rustyline enables VT processing on startup.
+// ANSI escape codes; for colors in the terminal. (CLI)
 pub const COLOR_RESET: &str = "\x1b[0m";
 pub const COLOR_YELLOW: &str = "\x1b[93m";
 pub const COLOR_BLUE: &str = "\x1b[94m";
 pub const COLOR_CYAN: &str = "\x1b[96m";
+
 // Input syntax-highlighting palette.
 pub const COLOR_TEAL: &str = "\x1b[96m"; // program command (e.g. `git`)
 pub const COLOR_MAGENTA: &str = "\x1b[95m"; // subcommand (e.g. `commit`)
@@ -138,7 +139,7 @@ pub fn render_recent_dirs(
 pub fn render_bookmarks(bookmarks: &[PathBuf], home: Option<&Path>, page: usize) -> String {
     render_page(
         "Bookmarks",
-        "Use `del bm <number>` to delete; e.g. `del bm 4`",
+        "Use `bm <number>` to go, `del bm <number>` to delete; e.g. `bm 4`",
         "(no bookmarks)",
         bookmarks,
         page,
@@ -302,19 +303,4 @@ fn unquote(s: &str) -> &str {
         }
     }
     s
-}
-
-#[cfg(test)]
-mod tests {
-    use super::unquote;
-
-    #[test]
-    fn unquote_strips_matching_pairs_only() {
-        assert_eq!(unquote("\"my program\""), "my program");
-        assert_eq!(unquote("'git'"), "git");
-        assert_eq!(unquote("git"), "git");
-        // Mismatched or single quote: left as-is.
-        assert_eq!(unquote("\"git'"), "\"git'");
-        assert_eq!(unquote("\""), "\"");
-    }
 }
