@@ -25,7 +25,8 @@ Highlights:
 
 ## Quickstart
 Download and launch from [the releases page](https://github.com/David-OConnor/shell/releases/). If not using Windows
-or Ubuntu/Debian, or on an ARM CPU, compile with `cargo r --release`.
+or Ubuntu/Debian, or on an ARM CPU, compile with `cargo r --release`. You may wish to place the executable
+somewhere convenient, and add it to the system path; then you can launch by typing `shell`.
 
 Try these commands:
 - Ctrl + B: Add a bookmark
