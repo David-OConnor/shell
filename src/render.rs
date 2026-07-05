@@ -32,14 +32,14 @@ pub const COLOR_RED: &str = "\x1b[91m"; // unrecognised command word
 /// otherwise use the absolute form. Uses forward slashes after the tilde for
 /// consistency with the rest of the shell.
 pub fn render_with_tilde(p: &Path, home: Option<&Path>) -> String {
-    if let Some(home) = home {
-        if let Ok(rest) = p.strip_prefix(home) {
-            let rest_str = rest.to_string_lossy().replace('\\', "/");
-            if rest_str.is_empty() {
-                return "~".to_string();
-            }
-            return format!("~/{}", rest_str);
+    if let Some(home) = home
+        && let Ok(rest) = p.strip_prefix(home)
+    {
+        let rest_str = rest.to_string_lossy().replace('\\', "/");
+        if rest_str.is_empty() {
+            return "~".to_string();
         }
+        return format!("~/{}", rest_str);
     }
     p.display().to_string()
 }
@@ -94,11 +94,13 @@ fn render_page<T>(
     } else {
         let end = total - page * per_page;
         let start = end.saturating_sub(per_page);
+
         for i in start..end {
             msg.push_str(&format_row(i, &items[i]));
             msg.push('\n');
         }
     }
+
     msg.push_str(DIVIDER);
     msg.push_str("\n\n");
     msg
@@ -160,57 +162,57 @@ impl Highlighter for ShellHelper {
         prompt: &'p str,
         _default: bool,
     ) -> Cow<'b, str> {
-        if let Some(rest) = prompt.strip_prefix("S ") {
-            if let Some(dollar_idx) = rest.rfind(" $ ") {
-                let body = &rest[..dollar_idx];
-                let tail = &rest[dollar_idx + 3..]; // usually empty
+        if let Some(rest) = prompt.strip_prefix("S ")
+            && let Some(dollar_idx) = rest.rfind(" $ ")
+        {
+            let body = &rest[..dollar_idx];
+            let tail = &rest[dollar_idx + 3..]; // usually empty
 
-                // Peel off the trailing recall indicator first, then the
-                // branch slot, leaving the bare cwd. Search from the right
-                // on each so a literal "branch:" mid-path can't fool us.
-                let his_at = body.rfind(HIS_PREFIX);
-                let cd_at = body.rfind(CD_PREFIX);
-                let indicator_at = match (his_at, cd_at) {
-                    (Some(a), Some(b)) => Some(a.max(b)),
-                    (Some(a), None) => Some(a),
-                    (None, Some(b)) => Some(b),
-                    (None, None) => None,
-                };
+            // Peel off the trailing recall indicator first, then the
+            // branch slot, leaving the bare cwd. Search from the right
+            // on each so a literal "branch:" mid-path can't fool us.
+            let his_at = body.rfind(HIS_PREFIX);
+            let cd_at = body.rfind(CD_PREFIX);
+            let indicator_at = match (his_at, cd_at) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
 
-                let (before_indicator, indicator) = match indicator_at {
-                    Some(i) => (&body[..i], Some(&body[i + 1..])),
-                    None => (body, None),
-                };
+            let (before_indicator, indicator) = match indicator_at {
+                Some(i) => (&body[..i], Some(&body[i + 1..])),
+                None => (body, None),
+            };
 
-                // The venv marker carries no value, so an exact-suffix strip is
-                // precise — no need for the right-search the branch slot uses.
-                let (before_venv, venv) = match before_indicator.strip_suffix(VENV_PREFIX) {
-                    Some(rest) => (rest, Some(VENV_PREFIX.trim_start())),
-                    None => (before_indicator, None),
-                };
+            // The venv marker carries no value, so an exact-suffix strip is
+            // precise — no need for the right-search the branch slot uses.
+            let (before_venv, venv) = match before_indicator.strip_suffix(VENV_PREFIX) {
+                Some(rest) => (rest, Some(VENV_PREFIX.trim_start())),
+                None => (before_indicator, None),
+            };
 
-                let (dir, branch) = match before_venv.rfind(BRANCH_PREFIX) {
-                    Some(i) => (&before_venv[..i], Some(&before_venv[i + 1..])),
-                    None => (before_venv, None),
-                };
+            let (dir, branch) = match before_venv.rfind(BRANCH_PREFIX) {
+                Some(i) => (&before_venv[..i], Some(&before_venv[i + 1..])),
+                None => (before_venv, None),
+            };
 
-                let branch_part = match branch {
-                    Some(b) => format!(" {COLOR_MAGENTA}{b}{COLOR_RESET}"),
-                    None => String::new(),
-                };
-                let venv_part = match venv {
-                    Some(v) => format!(" {COLOR_BLUE}{v}{COLOR_RESET}"),
-                    None => String::new(),
-                };
-                let indicator_part = match indicator {
-                    Some(ind) => format!(" {COLOR_GREEN}{ind}{COLOR_RESET}"),
-                    None => String::new(),
-                };
+            let branch_part = match branch {
+                Some(b) => format!(" {COLOR_MAGENTA}{b}{COLOR_RESET}"),
+                None => String::new(),
+            };
+            let venv_part = match venv {
+                Some(v) => format!(" {COLOR_BLUE}{v}{COLOR_RESET}"),
+                None => String::new(),
+            };
+            let indicator_part = match indicator {
+                Some(ind) => format!(" {COLOR_GREEN}{ind}{COLOR_RESET}"),
+                None => String::new(),
+            };
 
-                return Cow::Owned(format!(
-                    "{COLOR_YELLOW}S{COLOR_RESET} {dir}{branch_part}{venv_part}{indicator_part} {COLOR_YELLOW}${COLOR_RESET} {tail}"
-                ));
-            }
+            return Cow::Owned(format!(
+                "{COLOR_YELLOW}S{COLOR_RESET} {dir}{branch_part}{venv_part}{indicator_part} {COLOR_YELLOW}${COLOR_RESET} {tail}"
+            ));
         }
         Cow::Borrowed(prompt)
     }

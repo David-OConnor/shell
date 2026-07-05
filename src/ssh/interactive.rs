@@ -50,7 +50,7 @@ impl RemoteSession {
                 while let Some(msg) = read_half.wait().await {
                     match msg {
                         ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
-                            // Receiver gone (session dropped) → stop reading.
+                            // Receiver gone (session dropped): stop reading.
                             if tx.send(data.to_vec()).is_err() {
                                 break;
                             }

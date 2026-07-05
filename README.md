@@ -40,18 +40,16 @@ Type `cd`, then a few characters from the folder name, then press tab to complet
 
 ![Example bookmarks and ssh](/screenshots/recent_dir_example_0.png)
 
-### Autosuggestions (fish-style ghost text)
-As you type, Shell shows a dimmed (grey) suggestion after the cursor: the most recent command from your history that starts with what you've typed so far. Press → (Right arrow) or End — at the end of the line — to accept it; keep typing to ignore it. Suggestions draw on your full saved history, not just the current session.
+### Autosuggestions
+As you type, Shell shows a dimmed (grey) suggestion after the cursor: the most recent command from your history that starts with what you've typed so far. Press Right Arrow or End to accept it; keep typing to ignore it. Suggestions draw on your full saved history, not just the current session.
 
 
 ### Tab completion
 Tab completes the `cd` argument against your bookmarks first, then directories on disk (including nested paths like `code/Bi`). Other commands fall back to filename completion in the current directory.
 
-Matching is fuzzy, ranked best-first: an exact prefix wins, then a substring match (e.g. `cd ponents` → `components`), then a subsequence/fuzzy match where the typed characters appear in order (e.g. `cd cpt` → `components`). Matching is case-insensitive throughout.
-
 
 ## Syntax highlighting
-The in-progress input is colored as you type: the command word is teal, the subcommand magenta, flags/parameters green, and quote characters orange. The command word turns **red** when it isn't recognized — i.e. it's not a built-in, not a known shell word, and not an executable found on your PATH.
+The in-progress input is colored as you type: the command word is teal, the subcommand magenta, flags/parameters green, and quote characters orange. The command word turns **red** when it isn't recognized, i.e. it's not a built-in, not a known shell word, and not an executable found on your PATH.
 
 
 ## Git assistance
@@ -125,7 +123,6 @@ The shell handles `ssh` itself (in-process, via the `russh` library) instead of 
 - Tab key: while using with cd, autocompletes, including to bookmarks.
 
 
-
 ### Recent or frequent commands
 - Ctrl + B: Bookmark the current directory.
 - Ctrl + R: List the most recent directories a command has been executed from.
@@ -138,4 +135,4 @@ The shell handles `ssh` itself (in-process, via the `russh` library) instead of 
 
 ## Application state
 Application state, including folder bookmarks, is saved in a file called `shell_state.ss`, in the user's
-home directory. It is small, typically a few tens of kb.
+home directory. It is text-based file format with backwards compatibility support.

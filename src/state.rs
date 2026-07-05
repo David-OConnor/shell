@@ -166,22 +166,22 @@ impl State {
         let bookmarks = self
             .dir_bookmarks
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "bookmark lock poisoned"))?;
+            .map_err(|_| io::Error::other("bookmark lock poisoned"))?;
 
         let recent = self
             .recent_dirs
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "recent-dirs lock poisoned"))?;
+            .map_err(|_| io::Error::other("recent-dirs lock poisoned"))?;
 
         let history = self
             .history
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "history lock poisoned"))?;
+            .map_err(|_| io::Error::other("history lock poisoned"))?;
 
         let remote_terminals = self
             .remote_terminals
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "remote-terminals lock poisoned"))?;
+            .map_err(|_| io::Error::other("remote-terminals lock poisoned"))?;
 
         save_data::save_state(
             &bookmarks,

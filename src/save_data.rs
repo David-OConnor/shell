@@ -82,10 +82,10 @@ pub fn save_state(
     font_size: Option<f32>,
     path: &Path,
 ) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
     }
 
     let mut f = fs::File::create(path)?;
@@ -245,14 +245,13 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
             let mut parts = rest.splitn(3, '\t');
             if let (Some(dt_str), Some(dir_str), Some(text)) =
                 (parts.next(), parts.next(), parts.next())
+                && let Ok(dt) = DateTime::parse_from_rfc3339(dt_str)
             {
-                if let Ok(dt) = DateTime::parse_from_rfc3339(dt_str) {
-                    history.push(HistoryItem {
-                        text: text.to_string(),
-                        dir: PathBuf::from(dir_str),
-                        dt: dt.with_timezone(&Utc),
-                    });
-                }
+                history.push(HistoryItem {
+                    text: text.to_string(),
+                    dir: PathBuf::from(dir_str),
+                    dt: dt.with_timezone(&Utc),
+                });
             }
             continue;
         }
@@ -260,7 +259,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
             // Parse `key=val key=val ...`. Unknown keys are ignored;
             // missing keys keep their default. A malformed value just
             // leaves that field at its default.
-            for pair in rest.trim_end().split_whitespace() {
+            for pair in rest.split_whitespace() {
                 let Some((k, v)) = pair.split_once('=') else {
                     continue;
                 };
@@ -283,7 +282,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
             // degenerate entry leaves `window_size` at `None` so the GUI
             // uses its default rather than opening a zero-size window.
             let (mut x, mut y) = (None, None);
-            for pair in rest.trim_end().split_whitespace() {
+            for pair in rest.split_whitespace() {
                 let Some((k, v)) = pair.split_once('=') else {
                     continue;
                 };
@@ -293,10 +292,13 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
                     _ => {}
                 }
             }
-            if let (Some(x), Some(y)) = (x, y) {
-                if x.is_finite() && y.is_finite() && x > 0.0 && y > 0.0 {
-                    window_size = Some(WindowSize { x, y });
-                }
+            if let (Some(x), Some(y)) = (x, y)
+                && x.is_finite()
+                && y.is_finite()
+                && x > 0.0
+                && y > 0.0
+            {
+                window_size = Some(WindowSize { x, y });
             }
             continue;
         }
@@ -316,16 +318,16 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
             // Parse `size=<points>`. Only adopt a positive, finite value — a
             // malformed or degenerate entry leaves `font_size` at `None` so the
             // GUI uses its default rather than a zero-height font.
-            for pair in rest.trim_end().split_whitespace() {
+            for pair in rest.split_whitespace() {
                 let Some((k, v)) = pair.split_once('=') else {
                     continue;
                 };
-                if k == "size" {
-                    if let Ok(s) = v.parse::<f32>() {
-                        if s.is_finite() && s > 0.0 {
-                            font_size = Some(s);
-                        }
-                    }
+                if k == "size"
+                    && let Ok(s) = v.parse::<f32>()
+                    && s.is_finite()
+                    && s > 0.0
+                {
+                    font_size = Some(s);
                 }
             }
             continue;
@@ -336,14 +338,13 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
             let mut parts = rest.splitn(4, '\t');
             if let (Some(host), Some(port_str), Some(username)) =
                 (parts.next(), parts.next(), parts.next())
+                && let Ok(port) = port_str.parse::<u16>()
             {
-                if let Ok(port) = port_str.parse::<u16>() {
-                    remote_terminals.push(RemoteTerminal {
-                        host: host.to_string(),
-                        port,
-                        username: username.to_string(),
-                    });
-                }
+                remote_terminals.push(RemoteTerminal {
+                    host: host.to_string(),
+                    port,
+                    username: username.to_string(),
+                });
             }
             continue;
         }

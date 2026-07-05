@@ -342,12 +342,11 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
             _ => Some(input.to_string()),
         };
 
-        if let Some(command) = remote_cmd {
-            if let Some(session) = state.active_remote.as_mut() {
-                if let Err(e) = session.run(&command, &mut sink) {
-                    eprintln!("ssh: {e}");
-                }
-            }
+        if let Some(command) = remote_cmd
+            && let Some(session) = state.active_remote.as_mut()
+            && let Err(e) = session.run(&command, &mut sink)
+        {
+            eprintln!("ssh: {e}");
         }
         return true;
     }
@@ -482,20 +481,20 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
                         // If the recent-dir entry's path no longer exists on
                         // disk, prune it so the indices shift down and the
                         // user doesn't hit the same stale row forever.
-                        if e.kind() == io::ErrorKind::NotFound {
-                            if let Some(i) = recent_idx {
-                                let mut removed = false;
-                                if let Ok(mut list) = state.recent_dirs.lock() {
-                                    if list.get(i).map(|r| r.path == target).unwrap_or(false) {
-                                        list.remove(i);
-                                        removed = true;
-                                    }
-                                }
-                                if removed {
-                                    eprintln!("cd: removed stale recent-dir entry {i}");
-                                    if let Err(e) = state.save(state_path) {
-                                        eprintln!("warning: failed to save state: {e}");
-                                    }
+                        if e.kind() == io::ErrorKind::NotFound
+                            && let Some(i) = recent_idx
+                        {
+                            let mut removed = false;
+                            if let Ok(mut list) = state.recent_dirs.lock()
+                                && list.get(i).map(|r| r.path == target).unwrap_or(false)
+                            {
+                                list.remove(i);
+                                removed = true;
+                            }
+                            if removed {
+                                eprintln!("cd: removed stale recent-dir entry {i}");
+                                if let Err(e) = state.save(state_path) {
+                                    eprintln!("warning: failed to save state: {e}");
                                 }
                             }
                         }

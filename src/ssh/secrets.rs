@@ -40,10 +40,7 @@ pub fn set_password(host: &str, port: u16, user: &str, password: &str) -> io::Re
 /// missing password as "ask the user / can't auto-connect".
 pub fn get_password(host: &str, port: u16, user: &str) -> Option<String> {
     let entry = Entry::new(SERVICE, &account(host, port, user)).ok()?;
-    match entry.get_password() {
-        Ok(pw) => Some(pw),
-        Err(_) => None,
-    }
+    entry.get_password().ok()
 }
 
 /// Remove a stored password. A missing entry is treated as success — deleting

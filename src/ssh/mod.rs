@@ -302,10 +302,10 @@ pub fn cmd_ssh(state: &mut State, state_path: &Path, args: &str) {
             // its rich line editing instead of handing the terminal to a raw
             // remote shell.) The user opts into a raw interactive shell with
             // `mode pty` when one is actually needed — e.g. python, vim, top.
-            if let Some(session) = state.active_remote.as_mut() {
-                if let Err(e) = session.set_mode(SshMode::Exec) {
-                    eprintln!("ssh: {e}");
-                }
+            if let Some(session) = state.active_remote.as_mut()
+                && let Err(e) = session.set_mode(SshMode::Exec)
+            {
+                eprintln!("ssh: {e}");
             }
         }
         Err(e) => eprintln!("ssh: {e}"),
@@ -526,21 +526,21 @@ pub(crate) fn remote_set_mode(state: &mut State, args: &str) {
     };
 
     if target == SshMode::Exec {
-        if let Some(session) = state.active_remote.as_mut() {
-            if let Err(e) = session.set_mode(SshMode::Exec) {
-                eprintln!("mode: {e}");
-            }
+        if let Some(session) = state.active_remote.as_mut()
+            && let Err(e) = session.set_mode(SshMode::Exec)
+        {
+            eprintln!("mode: {e}");
         }
         return;
     }
 
     // Entering PTY mode: open the shell channel (a no-op if we're already in
     // PTY mode, e.g. straight after connect), then drive the interactive loop.
-    if let Some(session) = state.active_remote.as_mut() {
-        if let Err(e) = session.set_mode(SshMode::Pty) {
-            eprintln!("mode: {e}");
-            return;
-        }
+    if let Some(session) = state.active_remote.as_mut()
+        && let Err(e) = session.set_mode(SshMode::Pty)
+    {
+        eprintln!("mode: {e}");
+        return;
     }
     enter_pty_loop(state);
 }

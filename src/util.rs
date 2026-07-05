@@ -87,14 +87,14 @@ pub fn path_from_args(
 /// within the lib (the CLI and GUI each have their own copy), so it's
 /// crate-private rather than part of the public API.
 pub(crate) fn render_with_tilde(p: &Path, home: Option<&Path>) -> String {
-    if let Some(home) = home {
-        if let Ok(rest) = p.strip_prefix(home) {
-            let rest_str = rest.to_string_lossy().replace('\\', "/");
-            if rest_str.is_empty() {
-                return "~".to_string();
-            }
-            return format!("~/{}", rest_str);
+    if let Some(home) = home
+        && let Ok(rest) = p.strip_prefix(home)
+    {
+        let rest_str = rest.to_string_lossy().replace('\\', "/");
+        if rest_str.is_empty() {
+            return "~".to_string();
         }
+        return format!("~/{}", rest_str);
     }
     p.display().to_string()
 }
@@ -113,17 +113,13 @@ fn is_executable_file(path: &Path, _metadata: &fs::Metadata) -> bool {
     }
 
     #[cfg(not(unix))]
-    {
-        match path
-            .extension()
+    matches!(
+        path.extension()
             .and_then(|e| e.to_str())
             .map(|s| s.to_ascii_lowercase())
-            .as_deref()
-        {
-            Some("exe") | Some("msi") => true,
-            _ => false,
-        }
-    }
+            .as_deref(),
+        Some("exe") | Some("msi")
+    )
 }
 
 /// Snapshot the contents of `dir` as a `Vec<BrowserFile>`. Folders are

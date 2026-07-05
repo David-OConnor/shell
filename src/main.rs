@@ -244,22 +244,20 @@ impl Completer for ShellHelper {
         // path completer so nested args like `code/Bi` resolve correctly.
         let bookmarks = self.bookmarks.lock();
         let bookmark_slice: &[PathBuf] = bookmarks.as_deref().map(|v| v.as_slice()).unwrap_or(&[]);
-        if let Ok(cwd) = env::current_dir() {
-            if let Some(result) =
+        if let Ok(cwd) = env::current_dir()
+            && let Some(result) =
                 complete_cd_path(line, pos, &cwd, self.home.as_deref(), bookmark_slice)
-            {
-                if !result.candidates.is_empty() {
-                    let pairs = result
-                        .candidates
-                        .into_iter()
-                        .map(|candidate| Pair {
-                            display: candidate.display,
-                            replacement: candidate.replacement,
-                        })
-                        .collect();
-                    return Ok((result.start, pairs));
-                }
-            }
+            && !result.candidates.is_empty()
+        {
+            let pairs = result
+                .candidates
+                .into_iter()
+                .map(|candidate| Pair {
+                    display: candidate.display,
+                    replacement: candidate.replacement,
+                })
+                .collect();
+            return Ok((result.start, pairs));
         }
         drop(bookmarks);
 
@@ -267,20 +265,19 @@ impl Completer for ShellHelper {
         // files as well as directories, so `./install_` + Tab fills in the
         // script name. rustyline's filename completer doesn't handle these as
         // the command word, so do it ourselves first.
-        if let Ok(cwd) = env::current_dir() {
-            if let Some(result) = complete_command_path(line, pos, &cwd, self.home.as_deref()) {
-                if !result.candidates.is_empty() {
-                    let pairs = result
-                        .candidates
-                        .into_iter()
-                        .map(|candidate| Pair {
-                            display: candidate.display,
-                            replacement: candidate.replacement,
-                        })
-                        .collect();
-                    return Ok((result.start, pairs));
-                }
-            }
+        if let Ok(cwd) = env::current_dir()
+            && let Some(result) = complete_command_path(line, pos, &cwd, self.home.as_deref())
+            && !result.candidates.is_empty()
+        {
+            let pairs = result
+                .candidates
+                .into_iter()
+                .map(|candidate| Pair {
+                    display: candidate.display,
+                    replacement: candidate.replacement,
+                })
+                .collect();
+            return Ok((result.start, pairs));
         }
 
         // Default: complete files & directories in the CWD (bash-style).
@@ -385,52 +382,48 @@ impl ConditionalEventHandler for BookmarkHandler {
         ctx: &EventContext<'_>,
     ) -> Option<Cmd> {
         let mut added = false;
-        if let Ok(cwd) = env::current_dir() {
-            if let Ok(mut list) = self.bookmarks.lock() {
-                let msg = if list.contains(&cwd) {
-                    "This bookmark already exists\n".to_string()
-                } else {
-                    let msg = format!("Added a bookmark: {}\n", cwd.display());
-                    list.push(cwd);
-                    added = true;
-                    // Lock recent_dirs, history, remote_terminals after
-                    // bookmarks — same order as State::save, so no
-                    // lock-order conflicts.
-                    if let Ok(recent) = self.recent_dirs.lock() {
-                        if let Ok(history) = self.history.lock() {
-                            if let Ok(remote_terminals) = self.remote_terminals.lock() {
-                                if let Err(e) = save_data::save_state(
-                                    &list,
-                                    &recent,
-                                    &history,
-                                    &remote_terminals,
-                                    &self.panel_vis,
-                                    self.window_size,
-                                    &self.open_tabs,
-                                    self.font_size,
-                                    &self.save_path,
-                                ) {
-                                    eprintln!("warning: failed to save state: {e}");
-                                }
-                            }
-                        }
-                    }
-                    msg
-                };
-                if let Ok(mut p) = self.printer.lock() {
-                    let _ = p.print(msg);
+        if let Ok(cwd) = env::current_dir()
+            && let Ok(mut list) = self.bookmarks.lock()
+        {
+            let msg = if list.contains(&cwd) {
+                "This bookmark already exists\n".to_string()
+            } else {
+                let msg = format!("Added a bookmark: {}\n", cwd.display());
+                list.push(cwd);
+                added = true;
+                // Lock recent_dirs, history, remote_terminals after
+                // bookmarks — same order as State::save, so no
+                // lock-order conflicts.
+                if let Ok(recent) = self.recent_dirs.lock()
+                    && let Ok(history) = self.history.lock()
+                    && let Ok(remote_terminals) = self.remote_terminals.lock()
+                    && let Err(e) = save_data::save_state(
+                        &list,
+                        &recent,
+                        &history,
+                        &remote_terminals,
+                        &self.panel_vis,
+                        self.window_size,
+                        &self.open_tabs,
+                        self.font_size,
+                        &self.save_path,
+                    )
+                {
+                    eprintln!("warning: failed to save state: {e}");
                 }
+                msg
+            };
+            if let Ok(mut p) = self.printer.lock() {
+                let _ = p.print(msg);
             }
         }
 
         // A newly added bookmark changes the prompt's `*` marker. Stash the
         // current input and interrupt so the main loop redraws the prompt with
         // the star straight away, restoring what the user had typed.
-        if added {
-            if let Ok(mut nav) = self.nav.lock() {
-                nav.pending_restart = Some(ctx.line().to_string());
-                return Some(Cmd::Interrupt);
-            }
+        if added && let Ok(mut nav) = self.nav.lock() {
+            nav.pending_restart = Some(ctx.line().to_string());
+            return Some(Cmd::Interrupt);
         }
 
         // Consume the keystroke so rustyline doesn't also run its default
@@ -531,10 +524,10 @@ impl ConditionalEventHandler for ShowListHandler {
         _positive: bool,
         _ctx: &EventContext<'_>,
     ) -> Option<Cmd> {
-        if let Some(msg) = self.render() {
-            if let Ok(mut p) = self.printer.lock() {
-                let _ = p.print(msg);
-            }
+        if let Some(msg) = self.render()
+            && let Ok(mut p) = self.printer.lock()
+        {
+            let _ = p.print(msg);
         }
         Some(Cmd::Noop)
     }
