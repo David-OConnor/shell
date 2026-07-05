@@ -30,10 +30,6 @@ Highlights:
 
 ### Using directory bookmarks
 
-Saving bookmarks
-```sh
-```
-
 #### Loading bookmarks
 
 ![Example bookmarks and ssh](/screenshots/bm_example_0.png)
