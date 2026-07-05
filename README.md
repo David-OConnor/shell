@@ -14,13 +14,31 @@ For a GUI version which has correspondingly more features, see [shell-gui](https
 
 Highlights:
 
-- Syntax highlighting (unrecognised commands shown in red)
+- Syntax highlighting
 - Directory bookmarks
 - Intuitive autocomplete (fuzzy / substring matching)
 - Fish-style autosuggestions and prefix history search
 - Shortcuts for common workflows, e.g. with git.
 
 ![Example history](/screenshots/his_example_0.png)
+
+
+## Quickstart
+Download and launch from [the releases page](https://github.com/David-OConnor/shell/releases/). If not using Windows
+or Ubuntu/Debian, or on an ARM CPU, compile with `cargo r --release`.
+
+Try these commands:
+- Ctrl + B: Add a bookmark
+- Clt + B: Show all bookmarks
+- `bm <number>` (e.g. `bm 2`): Go to this number in the bookmarks
+- Ctrl + R: Show recent directories
+- `cd <number>` (e.g. `cd 2`): Go to this number in the recent directories
+- Ctrl + H: Show command history
+- `his <number>` (e.g. `his 2`): Go to this number in the history
+- `remote add username@host`: Add a remote
+- `ssh list`: Show remotes
+- `ssh 2` Go to #2 on the SSH list
+- `cd cod` + Tab: Go to a bookmark or recent directory that contains these letters, e.g ~/code
 
 
 ## Example use
