@@ -8,11 +8,9 @@ use std::{
 };
 
 use rustyline::highlight::Highlighter;
-use shell::{HistoryItem, RecentDir};
+use shell::{DISP_PAGE_LEN, RecentDir, render_page};
 
-use crate::{
-    BRANCH_PREFIX, CD_PREFIX, DISP_HIST_LEN, DIVIDER, HIS_PREFIX, ShellHelper, VENV_PREFIX,
-};
+use crate::{BRANCH_PREFIX, CD_PREFIX, HIS_PREFIX, ShellHelper, VENV_PREFIX};
 
 // ANSI escape codes; for colors in the terminal. (CLI)
 pub const COLOR_RESET: &str = "\x1b[0m";
@@ -62,62 +60,6 @@ pub fn render_word(out: &mut String, text: &str, color: &str) {
     out.push_str(COLOR_RESET);
 }
 
-/// Render one page of a list: header with paging hint + usage hint, a
-/// page of rows, and a closing divider. Page 0 = the last `per_page`
-/// items (newest at the bottom). Rows are labelled with their absolute
-/// index into `items`, so the displayed number lines up with the
-/// corresponding `<cmd> <number>` invocation.
-fn render_page<T>(
-    title: &str,
-    usage_hint: &str,
-    empty_msg: &str,
-    items: &[T],
-    page: usize,
-    per_page: usize,
-    mut format_row: impl FnMut(usize, &T) -> String,
-) -> String {
-    let total = items.len();
-    let pages = crate::page_count(total, per_page);
-    let page = page.min(pages - 1);
-
-    let mut msg = format!(
-        "\n{title}  (← older page  → newer page).  {usage_hint}.  Page {}/{}:\n",
-        page + 1,
-        pages
-    );
-    msg.push_str(DIVIDER);
-    msg.push('\n');
-
-    if total == 0 {
-        msg.push_str(empty_msg);
-        msg.push('\n');
-    } else {
-        let end = total - page * per_page;
-        let start = end.saturating_sub(per_page);
-
-        for i in start..end {
-            msg.push_str(&format_row(i, &items[i]));
-            msg.push('\n');
-        }
-    }
-
-    msg.push_str(DIVIDER);
-    msg.push_str("\n\n");
-    msg
-}
-
-pub fn render_history(history: &[HistoryItem], page: usize) -> String {
-    render_page(
-        "History",
-        "Use `his <number>` to run; e.g. `his 4`",
-        "(no history)",
-        history,
-        page,
-        DISP_HIST_LEN,
-        |i, item| format!("{i}:  {}", item.text),
-    )
-}
-
 pub fn render_recent_dirs(
     recent: &[RecentDir],
     bookmarks: &[PathBuf],
@@ -126,11 +68,12 @@ pub fn render_recent_dirs(
 ) -> String {
     render_page(
         "Recent directories",
+        "Ctrl+O again: older page",
         "Use `cd <number>` to go; e.g. `cd 4`",
         "(no recent directories)",
         recent,
         page,
-        DISP_HIST_LEN,
+        DISP_PAGE_LEN,
         |i, r| {
             let star = if bookmarks.contains(&r.path) { "*" } else { "" };
             format!("{i}:  {star}{}", render_with_tilde(&r.path, home))
@@ -141,11 +84,12 @@ pub fn render_recent_dirs(
 pub fn render_bookmarks(bookmarks: &[PathBuf], home: Option<&Path>, page: usize) -> String {
     render_page(
         "Bookmarks",
+        "Alt+B again: older page",
         "Use `bm <number>` to go, `del bm <number>` to delete; e.g. `bm 4`",
         "(no bookmarks)",
         bookmarks,
         page,
-        DISP_HIST_LEN,
+        DISP_PAGE_LEN,
         |i, bm| format!("{i}:  {}", render_with_tilde(bm, home)),
     )
 }

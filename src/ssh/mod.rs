@@ -312,6 +312,21 @@ pub fn cmd_ssh(state: &mut State, state_path: &Path, args: &str) {
     }
 }
 
+/// Render the saved-remotes list in the same paginated frame as the
+/// history / recent-directories / bookmarks lists.
+pub fn render_remotes(remotes: &[RemoteTerminal], page: usize) -> String {
+    crate::render_page(
+        "Remotes",
+        "Ctrl+R again: older page",
+        "Use `ssh <number>` to connect, `remote del <number>` to delete; e.g. `ssh 0`",
+        "(no saved remotes — add one with `remote add user@host`)",
+        remotes,
+        page,
+        crate::DISP_PAGE_LEN,
+        |i, r| format!("{i}:  {}@{}:{}", r.username, r.host, r.port),
+    )
+}
+
 /// `remote list | add <[user@]host[:port]> | del <index>` — manage saved
 /// remotes and their keyring passwords.
 pub fn cmd_remote(state: &mut State, state_path: &Path, args: &str) {
@@ -322,13 +337,7 @@ pub fn cmd_remote(state: &mut State, state_path: &Path, args: &str) {
                 eprintln!("remote: list lock poisoned");
                 return;
             };
-            if list.is_empty() {
-                println!("remote: no saved remotes (add one with `remote add user@host`)");
-                return;
-            }
-            for (i, r) in list.iter().enumerate() {
-                println!("{i}: {}@{}:{}", r.username, r.host, r.port);
-            }
+            print!("{}", render_remotes(&list, 0));
         }
         "add" => {
             if rest.is_empty() {

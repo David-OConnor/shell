@@ -22,4 +22,7 @@ pub use state::{
     BrowserFile, HistoryItem, NavState, OpenTabs, PanelVis, RecentDir, RemoteTerminal, WindowSize,
     record_recent_dir,
 };
-pub use util::{get_home, path_from_args, quiet_command, read_browser_files};
+pub use util::{
+    DISP_PAGE_LEN, DIVIDER, get_home, page_count, path_from_args, quiet_command,
+    read_browser_files, render_history, render_page,
+};

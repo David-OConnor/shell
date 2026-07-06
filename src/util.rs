@@ -8,7 +8,97 @@ use std::{
     process::Command,
 };
 
-use crate::state::BrowserFile;
+use crate::state::{BrowserFile, HistoryItem};
+
+/// Horizontal rule framing the paginated lists (history, recent dirs,
+/// bookmarks, remotes) in the CLI.
+pub const DIVIDER: &str = "----------";
+
+/// How many items each paginated list shows per page.
+pub const DISP_PAGE_LEN: usize = 20;
+
+/// Total pages needed to show `total` items at `per_page` items per page.
+/// Returns 1 when empty so the renderer can still show a "Page 1/1" frame.
+pub fn page_count(total: usize, per_page: usize) -> usize {
+    if total == 0 {
+        1
+    } else {
+        total.div_ceil(per_page)
+    }
+}
+
+/// Render one page of a list: header with paging hint + usage hint, a
+/// page of rows, and a closing divider. Page 0 = the last `per_page`
+/// items (newest at the bottom). Rows are labelled with their absolute
+/// index into `items`, so the displayed number lines up with the
+/// corresponding `<cmd> <number>` invocation. Shared by the history,
+/// recent-directories, bookmarks, and remotes lists so they all present
+/// the same frame.
+///
+/// `paging_hint` tells the user how to reach the other pages (each list
+/// has a different trigger key); it's omitted when everything fits on
+/// one page.
+#[allow(clippy::too_many_arguments)]
+pub fn render_page<T>(
+    title: &str,
+    paging_hint: &str,
+    usage_hint: &str,
+    empty_msg: &str,
+    items: &[T],
+    page: usize,
+    per_page: usize,
+    mut format_row: impl FnMut(usize, &T) -> String,
+) -> String {
+    let total = items.len();
+    let pages = page_count(total, per_page);
+    let page = page.min(pages - 1);
+
+    let paging = if pages > 1 {
+        format!("  ({paging_hint})")
+    } else {
+        String::new()
+    };
+    let mut msg = format!(
+        "\n{title}{paging}.  {usage_hint}.  Page {}/{}:\n",
+        page + 1,
+        pages
+    );
+    msg.push_str(DIVIDER);
+    msg.push('\n');
+
+    if total == 0 {
+        msg.push_str(empty_msg);
+        msg.push('\n');
+    } else {
+        let end = total - page * per_page;
+        let start = end.saturating_sub(per_page);
+
+        for (i, item) in items.iter().enumerate().take(end).skip(start) {
+            msg.push_str(&format_row(i, item));
+            msg.push('\n');
+        }
+    }
+
+    msg.push_str(DIVIDER);
+    msg.push_str("\n\n");
+    msg
+}
+
+/// Render one page of command history. Lives in the shared lib (rather than
+/// the CLI's render module) so the Ctrl+H key handler and the `his p<N>`
+/// builtin print the identical frame.
+pub fn render_history(history: &[HistoryItem], page: usize) -> String {
+    render_page(
+        "Command History",
+        "Ctrl+H again: older page",
+        "Use `his <number>` to run, `his p<N>` to jump to a page; e.g. `his 4`",
+        "(no history)",
+        history,
+        page,
+        DISP_PAGE_LEN,
+        |i, item| format!("{i}:  {}", item.text),
+    )
+}
 
 /// Build a [`Command`] that won't make Windows allocate a console window for
 /// the child. Use this for any process whose output we capture (`.output()`)

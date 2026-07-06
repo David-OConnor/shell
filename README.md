@@ -28,18 +28,28 @@ Download and launch from [the releases page](https://github.com/David-OConnor/sh
 or Ubuntu/Debian, or on an ARM CPU, compile with `cargo r --release`. You may wish to place the executable
 somewhere convenient, and add it to the system path; then you can launch by typing `shell`.
 
-Try these commands:
-- Ctrl + B: Add a bookmark
-- Clt + B: Show all bookmarks
+### Try these commands:
+- Ctrl + B: Bookmark the current directory.
+- Alt + B: Show all directory bookmarks
 - `bm <number>` (e.g. `bm 2`): Go to this number in the bookmarks
-- Ctrl + R: Show recent directories
+- `bm <a few letters>` to go to a bookmark that contains these letters
+
+- Ctrl + O: Show recent directories
 - `cd <number>` (e.g. `cd 2`): Go to this number in the recent directories
-- Ctrl + H: Show command history
+- `cd <a few letters>` to go to a recent directory that contains these letters
+- 
+- Ctrl + H: Show command history. Press again to page through older entries
 - `his <number>` (e.g. `his 2`): Go to this number in the history
+- `his p<page>` (e.g. `his p2`): Jump to a page of the history list
+- `his <a few letters>` to go to a recent command that contains these letters
+
 - `remote add username@host`: Add a remote
-- `ssh list`: Show remotes
-- `ssh 2` Go to #2 on the SSH list
+- Ctrl + R (or `remote list`): Show remotes
+- `ssh 2` Go to #2 on the remotes list
 - `cd cod` + Tab: Go to a bookmark or recent directory that contains these letters, e.g ~/code
+
+- Use the arrow keys to navigate to recent items
+- Press Tab to autocomplete
 
 
 ## Example use
@@ -100,10 +110,11 @@ Run `logs <service>`, to view the recent Journalctl logs. Linux only. For exampl
 - `logs`: Runs journalctl -u -f with the service.
 - `del bm <number>`: Delete a bookmark by number. 
 - `his <number>`: Execute a command from history.
+- `his p<page>` (e.g. `his p2`): Show a page of the history list; page 1 is the most recent.
 - `hisd <number>`: Execute a command from history, in its original working dir.
 - `cat`: Displays the contents of a (generally text) file. Similar to the standard Linux operation, but
 also works on Windows.
-- `cd <number>`: Go to this recent directory (As listed with Ctrl + R). For bookmarks, use `bm <number>`.
+- `cd <number>`: Go to this recent directory (As listed with Ctrl + O). For bookmarks, use `bm <number>`.
 - `bm <number>`: Go to this bookmark (As listed with Alt + B)
 - `cd <part-of-path>` + Tab key: Go to this directory history item
 
@@ -117,7 +128,7 @@ The shell handles `ssh` itself (in-process, via the `russh` library) instead of 
 - `ssh [user@]host [port]` or `ssh <number>`: Connect to a host, or to a saved
   remote by its `remote list` index. On first connect you're prompted for a
   password (entered hidden), which is then saved to the keyring.
-- `remote list`: List saved remotes with their indices.
+- `remote list` (or Ctrl + R): List saved remotes with their indices.
 - `remote add [user@]host[:port]`: Save a remote (prompts for a password to store).
 - `remote del <number>`: Remove a saved remote (and its keyring password).
 - While connected, typed commands run on the remote. Two modes:
@@ -141,11 +152,36 @@ The shell handles `ssh` itself (in-process, via the `russh` library) instead of 
 
 ### Recent or frequent commands
 - Ctrl + B: Bookmark the current directory.
-- Ctrl + R: List the most recent directories a command has been executed from.
+- Ctrl + O: List the most recent directories a command has been executed from.
 - Ctrl + H: List the most recent items from history.
+- Ctrl + R: List saved SSH remotes.
 
 - Alt + B: List all bookmarks.
 - Ctrl + D: Exit
+
+These lists are paginated (newest items first). Press the same keystroke again
+to step to the next (older) page, wrapping back to the first page after the
+last. For history, `his p<number>` jumps straight to a page.
+
+
+### General terminal commands
+Standard line-editing shortcuts, provided by the underlying line editor:
+
+- Ctrl + A / Home: Move the cursor to the start of the line.
+- Ctrl + E / End: Move the cursor to the end of the line.
+- Ctrl + ← / Ctrl + →: Move the cursor back / forward one word.
+- Ctrl + W: Delete the word before the cursor.
+- Alt + D: Delete the word after the cursor.
+- Ctrl + K: Delete from the cursor to the end of the line.
+- Ctrl + U: Delete from the cursor to the start of the line.
+- Ctrl + Y: Paste the last deleted text.
+- Ctrl + T: Swap the two characters around the cursor. Alt + T swaps words.
+- Alt + C / Alt + U / Alt + L: Capitalize / uppercase / lowercase the word at the cursor.
+- Ctrl + _: Undo.
+- Ctrl + L: Clear the screen.
+- Ctrl + N / Ctrl + P: Next / previous history entry.
+- Ctrl + C: Cancel the current input.
+- Ctrl + D: Exit (on an empty line); delete the character under the cursor otherwise.
 
 
 

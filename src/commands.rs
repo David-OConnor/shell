@@ -223,6 +223,14 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
     // recording the meta-invocation so the user's history stays focused on
     // the resolved command (which the recursive call below will record).
     if cmd == "his" || cmd == "hist" {
+        // `his p<N>` jumps straight to a page of the history list (1-based,
+        // matching the header's `Page N/M`) instead of running an item.
+        if let Some(page) = args.strip_prefix('p').and_then(|n| n.parse::<usize>().ok()) {
+            if let Ok(h) = state.history.lock() {
+                print!("{}", crate::render_history(&h, page.saturating_sub(1)));
+            }
+            return true;
+        }
         match args.parse::<usize>() {
             Ok(idx) => {
                 let resolved = state
@@ -238,7 +246,7 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
                     None => eprintln!("{cmd}: no history item at index {idx}"),
                 }
             }
-            Err(_) => eprintln!("{cmd}: usage: {cmd} <number>"),
+            Err(_) => eprintln!("{cmd}: usage: {cmd} <number>, or {cmd} p<page> to show a page"),
         }
         return true;
     }
