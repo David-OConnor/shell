@@ -18,3 +18,12 @@ keyring = { version = "3", features = ["windows-native", "sync-secret-service", 
 russh = { version = "0.61.2", default-features = false, features = ["ring", "flate2", "rsa"] }
 # Required for russh.
 tokio = { version = "1.52.3", features = ["rt", "io-util", "macros", "sync", "rt-multi-thread", "net", "time"] }
+
+# Both of these are for ignoring Ctrl+C in the shell process itself, so it
+# interrupts the launched child process without also killing the shell.
+# Already in the dependency tree transitively; versions kept in sync with that.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

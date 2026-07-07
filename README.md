@@ -3,7 +3,7 @@ The terminal application I want to use. CLI or GUI.
 
 ## What this is
 
-A terminal application with improvements over the native ones it wraps. Good autocomplete. Knowledge of what folders are commonly used. Less typing. Syntax highlighting. First-class SSH support. Convenience functions for git repos and python virtual environments.
+A terminal application with improvements over the native ones it wraps. Good autocomplete. Knowledge of what directories are commonly used. Directory bookmarks. Syntax highlighting. Integrated SSH support. Convenience functionality for git repos and python virtual environments.
 
 Compatible with Windows, Linux, and Mac. Windows users need to have Powershell 7 or higher installed.
 
@@ -37,7 +37,7 @@ somewhere convenient, and add it to the system path; then you can launch by typi
 - Ctrl + O: Show recent directories
 - `cd <number>` (e.g. `cd 2`): Go to this number in the recent directories
 - `cd <a few letters>` to go to a recent directory that contains these letters
-- 
+
 - Ctrl + H: Show command history. Press again to page through older entries
 - `his <number>` (e.g. `his 2`): Go to this number in the history
 - `his p<page>` (e.g. `his p2`): Jump to a page of the history list

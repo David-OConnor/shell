@@ -557,6 +557,57 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
     true
 }
 
+/// Keep Ctrl+C aimed at launched child processes, not the shell itself.
+///
+/// The passthrough commands below run children with inherited stdio, and the
+/// terminal delivers the interrupt keystroke to *every* process attached to
+/// it: on Windows the console broadcasts CTRL_C_EVENT to all attached
+/// processes, and on Unix SIGINT goes to the whole foreground process group.
+/// Without a handler of our own, the default action terminates the shell
+/// along with the child, dropping the user out to their outer terminal.
+///
+/// Call once at startup. Rustyline is unaffected: during `readline()` it puts
+/// the terminal in raw mode (`ENABLE_PROCESSED_INPUT` off / `ISIG` off), so
+/// Ctrl+C there arrives as an ordinary key event and still cancels the input
+/// line rather than going through these process-level handlers.
+#[cfg(windows)]
+pub fn install_ctrl_c_shield() {
+    use windows_sys::Win32::System::Console::{
+        CTRL_BREAK_EVENT, CTRL_C_EVENT, SetConsoleCtrlHandler,
+    };
+
+    // Returning TRUE marks the event handled, so the system's default handler
+    // (ExitProcess) never runs for Ctrl+C / Ctrl+Break. Other events (console
+    // close, logoff, shutdown) fall through to the default via FALSE, so
+    // closing the terminal window still terminates the shell. Handler lists
+    // are per-process — children are unaffected and die from Ctrl+C normally.
+    unsafe extern "system" fn handler(event: u32) -> windows_sys::core::BOOL {
+        matches!(event, CTRL_C_EVENT | CTRL_BREAK_EVENT).into()
+    }
+    unsafe {
+        SetConsoleCtrlHandler(Some(handler), 1);
+    }
+}
+
+/// See the Windows variant above for the full story. A no-op *handler
+/// function* rather than `SIG_IGN`, because an ignored disposition survives
+/// `execve` — `SIG_IGN` would leave children ignoring Ctrl+C too, whereas a
+/// caught handler resets to the default action in the child automatically.
+/// `libc::signal` (as opposed to raw sigaction) gives BSD semantics on every
+/// libc we run on, i.e. SA_RESTART, so the shell's blocking `wait()`/reads
+/// aren't interrupted with EINTR when the keystroke lands.
+#[cfg(unix)]
+pub fn install_ctrl_c_shield() {
+    unsafe extern "C" fn noop(_sig: libc::c_int) {}
+    let handler: unsafe extern "C" fn(libc::c_int) = noop;
+    unsafe {
+        libc::signal(libc::SIGINT, handler as libc::sighandler_t);
+        // Ctrl+\ — would otherwise kill the shell with a core dump; bash
+        // ignores it at the interactive prompt for the same reason.
+        libc::signal(libc::SIGQUIT, handler as libc::sighandler_t);
+    }
+}
+
 /// Run a command line through the system shell (PowerShell 7+ on Windows, `sh`
 /// elsewhere), inheriting stdio so interactive programs work. Used for the
 /// catch-all passthrough and the venv-rewritten `python` invocation.

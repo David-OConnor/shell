@@ -551,6 +551,12 @@ impl ConditionalEventHandler for ShowListHandler {
 }
 
 fn main() {
+    // Keep Ctrl+C pointed at launched child processes: without this, a Ctrl+C
+    // meant for e.g. a running python script also terminates this shell,
+    // dropping the user out to their outer terminal. Must be installed before
+    // the first passthrough command runs; startup is the natural spot.
+    commands::install_ctrl_c_shield();
+
     // Resolve the persistent-state file path, then try to load. A missing
     // file is fine (first run); other I/O errors are reported but non-fatal.
     let state_path =
