@@ -635,6 +635,9 @@ fn main() {
     // All four list keystrokes share one handler type; this builds the
     // handler for a given list kind. `list_page` is shared across them so
     // repeating a list's keystroke advances its page (see ListPageState).
+    // The Ctrl+digit aliases below only fire thanks to the vendored rustyline
+    // patch (see Cargo.toml); they are Windows-only, since Unix terminals
+    // cannot transmit Ctrl+digit. The letter/Alt chords work everywhere.
     let list_page: ListPageState = Arc::new(Mutex::new(None));
     let show_list = |kind: NavKind| {
         EventHandler::Conditional(Box::new(ShowListHandler {
@@ -649,29 +652,45 @@ fn main() {
         }))
     };
 
-    // Alt + B: Display the current bookmark list.
+    // Display the current bookmark list.
     rl.bind_sequence(
         KeyEvent::new('b', Modifiers::ALT),
         show_list(NavKind::Bookmarks),
     );
+    rl.bind_sequence(
+        KeyEvent::new('1', Modifiers::CTRL),
+        show_list(NavKind::Bookmarks),
+    );
 
-    // Ctrl + R: Display the saved-remotes list. Overrides rustyline's
+    // Display the saved-remotes list. Overrides rustyline's
     // default reverse-i-search binding, which this shell doesn't use.
     rl.bind_sequence(
         KeyEvent::new('r', Modifiers::CTRL),
         show_list(NavKind::Remotes),
     );
+    rl.bind_sequence(
+        KeyEvent::new('4', Modifiers::CTRL),
+        show_list(NavKind::Remotes),
+    );
 
-    // Ctrl + O: Display the recent-directories list. Unbound in rustyline's
+    // Display the recent-directories list. Unbound in rustyline's
     // default keymap, so no editing feature is lost.
     rl.bind_sequence(
         KeyEvent::new('o', Modifiers::CTRL),
         show_list(NavKind::RecentDirs),
     );
+    rl.bind_sequence(
+        KeyEvent::new('2', Modifiers::CTRL),
+        show_list(NavKind::RecentDirs),
+    );
 
-    // Ctrl + H: Display recent command history
+    // Display recent command history
     rl.bind_sequence(
         KeyEvent::new('h', Modifiers::CTRL),
+        show_list(NavKind::History),
+    );
+    rl.bind_sequence(
+        KeyEvent::new('3', Modifiers::CTRL),
         show_list(NavKind::History),
     );
 

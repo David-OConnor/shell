@@ -3,6 +3,18 @@ name = "shell"
 version = "0.1.0"
 edition = "2024"
 
+# Keep the vendored (patched) rustyline out of this package's workspace.
+[workspace]
+exclude = ["vendor"]
+
+# Vendored copy of rustyline 18.0.0 with one local patch (src/tty/windows.rs):
+# the Windows console reports no character for Ctrl+digit, and upstream drops
+# those key events, so Ctrl+1..Ctrl+4 could never reach our bindings. The
+# patch recovers the digit from the virtual key code. Windows-only: Unix
+# terminals cannot transmit Ctrl+digit at all.
+[patch.crates-io]
+rustyline = { path = "vendor/rustyline" }
+
 [dependencies]
 chrono = "0.4.44"
 

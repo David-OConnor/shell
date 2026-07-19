@@ -30,21 +30,21 @@ somewhere convenient, and add it to the system path; then you can launch by typi
 
 ### Try these commands:
 - Ctrl + B: Bookmark the current directory.
-- Alt + B: Show all directory bookmarks
+- Alt + B or Ctrl + 1: Show all directory bookmarks
 - `bm <number>` (e.g. `bm 2`): Go to this number in the bookmarks
 - `bm <a few letters>` to go to a bookmark that contains these letters
 
-- Ctrl + O: Show recent directories
+- Ctrl + O or Ctrl + 2: Show recent directories
 - `cd <number>` (e.g. `cd 2`): Go to this number in the recent directories
 - `cd <a few letters>` to go to a recent directory that contains these letters
 - 
-- Ctrl + H: Show command history. Press again to page through older entries
+- Ctrl + H or Ctrl + 3: Show command history. Press again to page through older entries
 - `his <number>` (e.g. `his 2`): Go to this number in the history
 - `his p<page>` (e.g. `his p2`): Jump to a page of the history list
 - `his <a few letters>` to go to a recent command that contains these letters
 
 - `remote add username@host`: Add a remote
-- Ctrl + R (or `remote list`): Show remotes
+- Ctrl + R or Ctrl + 4 (or `remote list`): Show remotes
 - `ssh 2` Go to #2 on the remotes list
 - `cd cod` + Tab: Go to a bookmark or recent directory that contains these letters, e.g ~/code
 
@@ -152,12 +152,16 @@ The shell handles `ssh` itself (in-process, via the `russh` library) instead of 
 
 ### Recent or frequent commands
 - Ctrl + B: Bookmark the current directory.
-- Ctrl + O: List the most recent directories a command has been executed from.
-- Ctrl + H: List the most recent items from history.
-- Ctrl + R: List saved SSH remotes.
+- Ctrl + O or Ctrl + 2: List the most recent directories a command has been executed from.
+- Ctrl + H or Ctrl + 3: List the most recent commands executed.
+- Ctrl + R or Ctrl + 4: List saved SSH remotes.
 
-- Alt + B: List all bookmarks.
+- Alt + B or Ctrl + 1: List all bookmarks.
 - Ctrl + D: Exit
+
+Note: the Ctrl + 1–4 aliases work on Windows only (via a small patch to the
+bundled line editor — see `vendor/rustyline`). Unix terminals cannot transmit
+Ctrl + digit, so use the letter chords there.
 
 These lists are paginated (newest items first). Press the same keystroke again
 to step to the next (older) page, wrapping back to the first page after the
