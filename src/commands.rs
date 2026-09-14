@@ -339,6 +339,11 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
                 ssh::remote_set_mode(state, args);
                 return true;
             }
+            // Our own help, not the remote's — answer locally.
+            "shelp" => {
+                print!("{}", shelp_text(Frontend::Cli));
+                return true;
+            }
             "logs" => match ssh::remote_logs_command(args, &mut sink) {
                 Some(cmd) => Some(cmd),
                 None => return true,
@@ -361,6 +366,8 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
 
     match cmd {
         "exit" | "quit" => return false,
+
+        "shelp" => print!("{}", shelp_text(Frontend::Cli)),
 
         "ssh" => ssh::cmd_ssh(state, state_path, args),
 
@@ -643,4 +650,158 @@ fn rewrite_venv_command(exe: &Path, args: &str) -> String {
     } else {
         format!("{lead}'{exe}' {args}")
     }
+}
+
+/// Which frontend is asking for the [shelp_text] listing. The two shells
+/// differ in a handful of places — the GUI has always-visible panels instead
+/// of the CLI's list keystrokes, and its window can't be closed by typing
+/// `exit` — so each gets its own rows for those.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Frontend {
+    Cli,
+    Gui,
+}
+
+/// Append `rows` as `  - <invocation>   <description>` lines, with the
+/// invocation column padded so the descriptions line up.
+fn push_help_rows(out: &mut String, rows: &[(&str, &str)]) {
+    let width = rows.iter().map(|(name, _)| name.len()).max().unwrap_or(0);
+    for (name, desc) in rows {
+        out.push_str(&format!("  - {name:width$}   {desc}\n"));
+    }
+}
+
+/// Text for the `shelp` built-in: every command and key shortcut, one per
+/// line, indented with a dash. Lives here (rather than in either frontend) so
+/// the CLI and GUI listings can't drift apart — the CLI prints the string, the
+/// GUI pushes it into its output pane.
+pub fn shelp_text(frontend: Frontend) -> String {
+    let cli = frontend == Frontend::Cli;
+
+    let mut commands: Vec<(&str, &str)> = vec![
+        ("shelp", "Show this list of commands and key shortcuts"),
+        (
+            "cd <path>",
+            "Change directory. Takes `~`, a real path, or the start of a bookmark's name",
+        ),
+        ("cd <number>", "Go to a recent directory by its index"),
+        ("bm <number>", "Go to a bookmark by its index"),
+        ("del bm <number>", "Delete a bookmark by its index"),
+        ("cat <file>", "Print a file's contents; works on Windows too"),
+        (
+            "his <number>",
+            "Re-run a command from history (`hist` also works)",
+        ),
+    ];
+    if cli {
+        // The GUI shows history in a panel, so it has no page-jump form.
+        commands.push((
+            "his p<page>",
+            "Show a page of the history list; page 1 is the newest",
+        ));
+    }
+    commands.extend_from_slice(&[
+        (
+            "hisd <number>",
+            "Re-run a history item in the directory it was originally run from",
+        ),
+        (
+            "sync <message>",
+            "`git add .`, then `git commit -am <message>`, then `git push`",
+        ),
+        (
+            "logs <service>",
+            "Show a systemd service's journalctl logs. Linux only",
+        ),
+        (
+            "ssh [user@]host [port]",
+            "Connect to a host; `ssh <number>` connects to a saved remote",
+        ),
+        ("remote list", "List saved remotes with their indices"),
+        (
+            "remote add [user@]host[:port]",
+            "Save a remote, prompting for a password to keep in the OS keyring",
+        ),
+        (
+            "remote del <number>",
+            "Forget a saved remote, and its stored password",
+        ),
+        (
+            "mode exec|pty",
+            "While connected: captured per-command output, or an interactive shell",
+        ),
+    ]);
+    commands.push(if cli {
+        (
+            "exit, quit",
+            "Exit the shell. While connected to a remote, disconnect instead",
+        )
+    } else {
+        (
+            "exit, quit",
+            "While connected to a remote, disconnect. Otherwise, close the window",
+        )
+    });
+    commands.extend_from_slice(&[
+        (
+            "python, pip",
+            "Run the current directory's virtualenv copy, when it has one",
+        ),
+        (
+            "(anything else)",
+            "Passed through to the system shell: PowerShell 7 on Windows, `sh` elsewhere",
+        ),
+    ]);
+
+    let keys: &[(&str, &str)] = if cli {
+        &[
+            ("Enter", "Run the input"),
+            (
+                "Tab",
+                "Autocomplete: bookmarks and directories after `cd`, filenames otherwise",
+            ),
+            (
+                "Up / Down",
+                "Walk command history. With text already typed, only entries starting with it",
+            ),
+            (
+                "Left / Right",
+                "Walk recent directories, loading `cd <path>` into the input",
+            ),
+            (
+                "Right / End",
+                "Accept the dimmed autosuggestion at the end of the line",
+            ),
+            ("Ctrl + B", "Bookmark the current directory"),
+            ("Alt + B, or Ctrl + 1", "List bookmarks"),
+            ("Ctrl + O, or Ctrl + 2", "List recent directories"),
+            ("Ctrl + H, or Ctrl + 3", "List command history"),
+            ("Ctrl + R, or Ctrl + 4", "List saved SSH remotes"),
+            ("Ctrl + ]", "Leave an interactive (PTY) remote shell"),
+            ("Ctrl + C", "Cancel the current input"),
+            ("Ctrl + D", "Exit"),
+        ]
+    } else {
+        &[
+            ("Enter", "Run the input"),
+            ("Tab", "Autocomplete the input"),
+            ("Up / Down", "Walk command history"),
+            (
+                "Left / Right",
+                "Walk recent directories, while the input is empty",
+            ),
+        ]
+    };
+
+    let mut out = String::from("\nCommands:\n");
+    push_help_rows(&mut out, &commands);
+    out.push_str("\nKey shortcuts:\n");
+    push_help_rows(&mut out, keys);
+    if cli {
+        out.push_str(
+            "\nPress a list's keystroke again to page back through older entries.\n\
+             The Ctrl + 1-4 aliases are Windows-only.\n",
+        );
+    }
+    out
 }

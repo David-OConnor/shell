@@ -78,6 +78,7 @@ struct ShellHelper {
 const BUILTINS: &[&str] = &[
     "exit",
     "quit",
+    "shelp",
     "cd",
     "bm",
     "cat",
