@@ -22,10 +22,12 @@ chrono = "0.4.44"
 rustyline = "18.0.0"
 crossterm = "0.29.0"
 
-# For use with ssh.
-keyring = { version = "3", features = ["windows-native", "sync-secret-service", "linux-native"] }
-# Default features pull `aws-lc-rs`, whose `aws-lc-sys` build needs NASM + a C
-# toolchain on Windows. Use the pure-Rust-ish `ring` crypto backend instead
+# `keyring` (SSH password storage) is listed per platform in the `[target...]`
+# sections below: its backends have different system requirements, so the
+# feature set can't be shared.
+
+# For use with ssh. Default features pull `aws-lc-rs`, whose `aws-lc-sys`
+# build needs NASM + a C toolchain on Windows. Use the pure-Rust-ish `ring` crypto backend instead
 # (vendored asm, no NASM), keeping compression (`flate2`) and RSA key support.
 russh = { version = "0.61.2", default-features = false, features = ["ring", "flate2", "rsa"] }
 # Required for russh.
@@ -36,6 +38,21 @@ tokio = { version = "1.52.3", features = ["rt", "io-util", "macros", "sync", "rt
 # Already in the dependency tree transitively; versions kept in sync with that.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+# Windows Credential Manager.
+keyring = { version = "3", features = ["windows-native"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Kernel keyutils, not the DBus Secret Service. Secret Service needs
+# `libdbus-1-dev` at build time and a running secret-service daemon at run
+# time; neither is present in a bare WSL/container/headless install, so
+# enabling it broke the Linux build outright. keyutils is in the kernel and
+# always available. Trade-off: keys live in the session keyring, so saved SSH
+# passwords are forgotten on logout rather than persisting.
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["linux-native"] }
+
+# macOS Keychain.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }

@@ -29,6 +29,8 @@ or Ubuntu/Debian, or on an ARM CPU, compile with `cargo r --release`. You may wi
 somewhere convenient, and add it to the system path; then you can launch by typing `shell`.
 
 ### Try these commands:
+- `shelp`: Show all commands and key shortcuts.
+
 - Ctrl + B: Bookmark the current directory.
 - Alt + B or Ctrl + 1: Show all directory bookmarks
 - `bm <number>` (e.g. `bm 2`): Go to this number in the bookmarks
@@ -37,13 +39,8 @@ somewhere convenient, and add it to the system path; then you can launch by typi
 - Ctrl + O or Ctrl + 2: Show recent directories
 - `cd <number>` (e.g. `cd 2`): Go to this number in the recent directories
 - `cd <a few letters>` to go to a recent directory that contains these letters
-<<<<<<< HEAD
-- 
-- Ctrl + H or Ctrl + 3: Show command history. Press again to page through older entries
-=======
 
-- Ctrl + H: Show command history. Press again to page through older entries
->>>>>>> 2e23b6cbafd78cbc0f8f2027274d9a78f4cfc528
+- Ctrl + H or Ctrl + 3: Show command history. Press again to page through older entries
 - `his <number>` (e.g. `his 2`): Go to this number in the history
 - `his p<page>` (e.g. `his p2`): Jump to a page of the history list
 - `his <a few letters>` to go to a recent command that contains these letters
@@ -110,6 +107,7 @@ Run `logs <service>`, to view the recent Journalctl logs. Linux only. For exampl
 
 
 ### Typed commands
+- `shelp`: List every command and key shortcut, one per line.
 - `exit` or `quit`: Exit the program.
 - `sync`: Run `git add .`, `git commit -am <the commit message>`, and `git push`.
 - `logs`: Runs journalctl -u -f with the service.

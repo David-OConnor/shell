@@ -687,7 +687,10 @@ pub fn shelp_text(frontend: Frontend) -> String {
         ("cd <number>", "Go to a recent directory by its index"),
         ("bm <number>", "Go to a bookmark by its index"),
         ("del bm <number>", "Delete a bookmark by its index"),
-        ("cat <file>", "Print a file's contents; works on Windows too"),
+        (
+            "cat <file>",
+            "Print a file's contents; works on Windows too",
+        ),
         (
             "his <number>",
             "Re-run a command from history (`hist` also works)",
