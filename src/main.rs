@@ -79,6 +79,8 @@ const BUILTINS: &[&str] = &[
     "exit",
     "quit",
     "shelp",
+    "--version",
+    "-v",
     "cd",
     "bm",
     "cat",
@@ -552,6 +554,15 @@ impl ConditionalEventHandler for ShowListHandler {
 }
 
 fn main() {
+    // `shell --version` / `shell -v` from the outer terminal: print and exit
+    // without starting the interactive shell.
+    if let Some(arg) = env::args().nth(1)
+        && (arg == "--version" || arg == "-v")
+    {
+        println!("{}", commands::version_line());
+        return;
+    }
+
     // Keep Ctrl+C pointed at launched child processes: without this, a Ctrl+C
     // meant for e.g. a running python script also terminates this shell,
     // dropping the user out to their outer terminal. Must be installed before

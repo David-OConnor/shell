@@ -344,6 +344,10 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
                 print!("{}", shelp_text(Frontend::Cli));
                 return true;
             }
+            "--version" | "-v" => {
+                println!("{}", version_line());
+                return true;
+            }
             "logs" => match ssh::remote_logs_command(args, &mut sink) {
                 Some(cmd) => Some(cmd),
                 None => return true,
@@ -368,6 +372,8 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
         "exit" | "quit" => return false,
 
         "shelp" => print!("{}", shelp_text(Frontend::Cli)),
+
+        "--version" | "-v" => println!("{}", version_line()),
 
         "ssh" => ssh::cmd_ssh(state, state_path, args),
 
@@ -671,6 +677,12 @@ fn push_help_rows(out: &mut String, rows: &[(&str, &str)]) {
     }
 }
 
+/// The `Shell version x.y.z` line shown by `--version` / `-v` and at the top
+/// of [shelp_text]. The number comes from `Cargo.toml`.
+pub fn version_line() -> String {
+    format!("Shell version {}", env!("CARGO_PKG_VERSION"))
+}
+
 /// Text for the `shelp` built-in: every command and key shortcut, one per
 /// line, indented with a dash. Lives here (rather than in either frontend) so
 /// the CLI and GUI listings can't drift apart — the CLI prints the string, the
@@ -680,6 +692,7 @@ pub fn shelp_text(frontend: Frontend) -> String {
 
     let mut commands: Vec<(&str, &str)> = vec![
         ("shelp", "Show this list of commands and key shortcuts"),
+        ("--version, -v", "Show the shell's version"),
         (
             "cd <path>",
             "Change directory. Takes `~`, a real path, or the start of a bookmark's name",
@@ -796,7 +809,7 @@ pub fn shelp_text(frontend: Frontend) -> String {
         ]
     };
 
-    let mut out = String::from("\nCommands:\n");
+    let mut out = format!("\n{}\n\nCommands:\n", version_line());
     push_help_rows(&mut out, &commands);
     out.push_str("\nKey shortcuts:\n");
     push_help_rows(&mut out, keys);
