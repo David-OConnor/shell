@@ -17,7 +17,7 @@ pub struct State {
     /// Cached. Read by `commands` (path resolution) but not by the binary
     /// frontends, so crate-private.
     pub(crate) home: Option<PathBuf>,
-    /// Shared with the Ctrl+H / arrow-key handlers, which render pages of
+    /// Shared with the Ctrl+3/4 and arrow-key handlers, which render pages of
     /// recent commands without holding `State`.
     pub history: Arc<Mutex<Vec<HistoryItem>>>,
     /// This initializes to env::current_dir, but is then managed from within

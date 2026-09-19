@@ -23,6 +23,7 @@ pub use state::{
     record_recent_dir,
 };
 pub use util::{
-    DISP_PAGE_LEN, DIVIDER, get_home, page_count, path_from_args, quiet_command,
-    read_browser_files, render_history, render_page,
+    DISP_PAGE_LEN, DIVIDER, find_bookmark, find_history_index, find_recent_dir, get_home,
+    history_indices_in_dir, page_count, path_from_args, quiet_command, read_browser_files,
+    render_history, render_history_in_dir, render_page,
 };

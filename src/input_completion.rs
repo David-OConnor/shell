@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::util;
+use crate::{RecentDir, util};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompletionResult {
@@ -46,14 +46,15 @@ pub fn apply_completion(line: &str, pos: usize, completion: &CompletionResult) -
 }
 
 /// Shared `cd` autocomplete used by both the CLI and GUI frontends. It
-/// completes bookmarked directory names first, then falls back to directory
-/// entries on disk, including nested relative paths like `code/Bi`.
+/// completes bookmarked directory names first, then recent directories, then
+/// directory entries on disk, including nested relative paths like `code/Bi`.
 pub fn complete_cd_path(
     line: &str,
     pos: usize,
     cwd: &Path,
     home: Option<&Path>,
     bookmarks: &[PathBuf],
+    recent_dirs: &[RecentDir],
 ) -> Option<CompletionResult> {
     if pos > line.len() || !line.is_char_boundary(pos) {
         return None;
@@ -74,6 +75,9 @@ pub fn complete_cd_path(
     let arg_start = leading + (trimmed.len() - arg.len());
 
     let mut candidates = complete_bookmarks(arg, home, bookmarks);
+    if candidates.is_empty() && !arg.is_empty() {
+        candidates = complete_recent_dirs(arg, home, recent_dirs);
+    }
     if candidates.is_empty() {
         candidates = complete_dirs(arg, cwd, home);
     }
@@ -82,6 +86,48 @@ pub fn complete_cd_path(
         start: arg_start,
         candidates,
     })
+}
+
+fn complete_recent_dirs(
+    arg: &str,
+    home: Option<&Path>,
+    recent_dirs: &[RecentDir],
+) -> Vec<CompletionCandidate> {
+    let mut scored: Vec<(u32, CompletionCandidate)> = recent_dirs
+        .iter()
+        .filter_map(|r| {
+            let name = r.path.file_name()?.to_str()?;
+            let score =
+                match_score(arg, name).or_else(|| match_score(arg, &r.path.to_string_lossy()))?;
+            Some((
+                score,
+                CompletionCandidate {
+                    display: name.to_string(),
+                    replacement: util::render_with_tilde(&r.path, home),
+                },
+            ))
+        })
+        .collect();
+    sort_scored(&mut scored);
+    scored.into_iter().map(|(_, c)| c).collect()
+}
+
+#[cfg(test)]
+mod recent_completion_tests {
+    use chrono::Utc;
+
+    use super::*;
+
+    #[test]
+    fn tab_completes_recent_directory() {
+        let recent = vec![RecentDir {
+            path: PathBuf::from("/work/code"),
+            dt: Utc::now(),
+        }];
+        let result = complete_cd_path("cd cod", 6, Path::new("/work"), None, &[], &recent).unwrap();
+        assert_eq!(result.candidates.len(), 1);
+        assert!(result.candidates[0].replacement.ends_with("code"));
+    }
 }
 
 fn complete_bookmarks(

@@ -52,6 +52,7 @@ type SharedPrinter = Arc<Mutex<Box<dyn ExternalPrinter + Send>>>;
 /// back to rustyline's built-in filename completer.
 struct ShellHelper {
     bookmarks: Arc<Mutex<Vec<PathBuf>>>,
+    recent_dirs: Arc<Mutex<Vec<RecentDir>>>,
     home: Option<PathBuf>,
     /// Rustyline's built-in filename completer, used as the fallback when no
     /// bookmark matches (and for non-`cd` commands).
@@ -88,6 +89,7 @@ const BUILTINS: &[&str] = &[
     "his",
     "hist",
     "hisd",
+    "this",
     "sync",
     "logs",
     "ssh",
@@ -241,10 +243,19 @@ impl Completer for ShellHelper {
         // If the command word is `cd`, use the shared bookmark + filesystem
         // path completer so nested args like `code/Bi` resolve correctly.
         let bookmarks = self.bookmarks.lock();
+        let recent_dirs = self.recent_dirs.lock();
         let bookmark_slice: &[PathBuf] = bookmarks.as_deref().map(|v| v.as_slice()).unwrap_or(&[]);
+        let recent_slice: &[RecentDir] =
+            recent_dirs.as_deref().map(|v| v.as_slice()).unwrap_or(&[]);
         if let Ok(cwd) = env::current_dir()
-            && let Some(result) =
-                complete_cd_path(line, pos, &cwd, self.home.as_deref(), bookmark_slice)
+            && let Some(result) = complete_cd_path(
+                line,
+                pos,
+                &cwd,
+                self.home.as_deref(),
+                bookmark_slice,
+                recent_slice,
+            )
             && !result.candidates.is_empty()
         {
             let pairs = result
@@ -258,6 +269,7 @@ impl Completer for ShellHelper {
             return Ok((result.start, pairs));
         }
         drop(bookmarks);
+        drop(recent_dirs);
 
         // Explicit paths (`./script.sh`, `../bin/foo`, `~/...`) complete against
         // files as well as directories, so `./install_` + Tab fills in the
@@ -430,10 +442,11 @@ impl ConditionalEventHandler for BookmarkHandler {
     }
 }
 
-/// Which paginated list a Ctrl+H / Ctrl+O / Ctrl+R / Alt+B keystroke opens.
+/// Which paginated list a Ctrl+1 through Ctrl+5 keystroke opens.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum NavKind {
     History,
+    HistoryInDir,
     RecentDirs,
     Bookmarks,
     Remotes,
@@ -473,13 +486,12 @@ impl CliNav {
 }
 
 /// Tracks which paginated list was shown last and on which page, so a
-/// repeated keystroke (e.g. Ctrl+H, Ctrl+H) advances to the next-older page
-/// instead of re-printing page 1. Shared by all four [ShowListHandler]s;
+/// repeated keystroke (e.g. Ctrl+3, Ctrl+3) advances to the next-older page
+/// instead of re-printing page 1. Shared by all five [ShowListHandler]s;
 /// cleared when a line is submitted so the next keystroke starts fresh.
 type ListPageState = Arc<Mutex<Option<(NavKind, usize)>>>;
 
-/// Rustyline key handler: prints one of the paginated lists (Ctrl+H for
-/// history, Ctrl+O for recent dirs, Ctrl+R for remotes, Alt+B for bookmarks)
+/// Rustyline key handler: prints one of the five paginated lists
 /// above the prompt. Pressing the same keystroke again cycles to the next
 /// (older) page, wrapping back to page 1 after the last; pressing a
 /// different list's keystroke starts that list at page 1.
@@ -505,6 +517,13 @@ impl ShowListHandler {
                 let page = requested % page_count(h.len(), DISP_PAGE_LEN);
                 Some((shell::render_history(&h, page), page))
             }
+            NavKind::HistoryInDir => {
+                let h = self.history.lock().ok()?;
+                let cwd = std::env::current_dir().ok()?;
+                let count = shell::history_indices_in_dir(&h, &cwd).len();
+                let page = requested % page_count(count, DISP_PAGE_LEN);
+                Some((shell::render_history_in_dir(&h, &cwd, page), page))
+            }
             NavKind::RecentDirs => {
                 let r = self.recent_dirs.lock().ok()?;
                 let bm = self.bookmarks.lock().ok()?;
@@ -517,7 +536,10 @@ impl ShowListHandler {
             NavKind::Bookmarks => {
                 let bm = self.bookmarks.lock().ok()?;
                 let page = requested % page_count(bm.len(), DISP_PAGE_LEN);
-                Some((render::render_bookmarks(&bm, self.home.as_deref(), page), page))
+                Some((
+                    render::render_bookmarks(&bm, self.home.as_deref(), page),
+                    page,
+                ))
             }
             NavKind::Remotes => {
                 let r = self.remote_terminals.lock().ok()?;
@@ -600,6 +622,7 @@ fn main() {
         .map(PathBuf::from);
     rl.set_helper(Some(ShellHelper {
         bookmarks: state.dir_bookmarks.clone(),
+        recent_dirs: state.recent_dirs.clone(),
         home: home.clone(),
         fs_completer: FilenameCompleter::new(),
         hinter: HistoryHinter::new(),
@@ -650,12 +673,10 @@ fn main() {
         })),
     );
 
-    // All four list keystrokes share one handler type; this builds the
+    // All five list keystrokes share one handler type; this builds the
     // handler for a given list kind. `list_page` is shared across them so
     // repeating a list's keystroke advances its page (see ListPageState).
-    // The Ctrl+digit aliases below only fire thanks to the vendored rustyline
-    // patch (see Cargo.toml); they are Windows-only, since Unix terminals
-    // cannot transmit Ctrl+digit. The letter/Alt chords work everywhere.
+    // Ctrl+digit works on Windows through the vendored rustyline patch.
     let list_page: ListPageState = Arc::new(Mutex::new(None));
     let show_list = |kind: NavKind| {
         EventHandler::Conditional(Box::new(ShowListHandler {
@@ -672,44 +693,30 @@ fn main() {
 
     // Display the current bookmark list.
     rl.bind_sequence(
-        KeyEvent::new('b', Modifiers::ALT),
-        show_list(NavKind::Bookmarks),
-    );
-    rl.bind_sequence(
         KeyEvent::new('1', Modifiers::CTRL),
         show_list(NavKind::Bookmarks),
     );
 
-    // Display the saved-remotes list. Overrides rustyline's
-    // default reverse-i-search binding, which this shell doesn't use.
+    // Display the saved-remotes list.
     rl.bind_sequence(
-        KeyEvent::new('r', Modifiers::CTRL),
-        show_list(NavKind::Remotes),
-    );
-    rl.bind_sequence(
-        KeyEvent::new('4', Modifiers::CTRL),
+        KeyEvent::new('5', Modifiers::CTRL),
         show_list(NavKind::Remotes),
     );
 
-    // Display the recent-directories list. Unbound in rustyline's
-    // default keymap, so no editing feature is lost.
-    rl.bind_sequence(
-        KeyEvent::new('o', Modifiers::CTRL),
-        show_list(NavKind::RecentDirs),
-    );
+    // Display the recent-directories list.
     rl.bind_sequence(
         KeyEvent::new('2', Modifiers::CTRL),
         show_list(NavKind::RecentDirs),
     );
 
-    // Display recent command history
-    rl.bind_sequence(
-        KeyEvent::new('h', Modifiers::CTRL),
-        show_list(NavKind::History),
-    );
+    // Display recent command history.
     rl.bind_sequence(
         KeyEvent::new('3', Modifiers::CTRL),
         show_list(NavKind::History),
+    );
+    rl.bind_sequence(
+        KeyEvent::new('4', Modifiers::CTRL),
+        show_list(NavKind::HistoryInDir),
     );
 
     // Arrow-key recall: ↑/↓ walk `state.history`; ←/→ walk `state.recent_dirs`.
@@ -769,7 +776,7 @@ fn main() {
                     n.reset();
                 }
                 // Submitting a line ends any list-page cycling; the next
-                // Ctrl+H / Ctrl+O / Ctrl+R / Alt+B starts back at page 1.
+                // Ctrl+1 through Ctrl+5 starts back at page 1.
                 if let Ok(mut lp) = list_page.lock() {
                     *lp = None;
                 }

@@ -8,7 +8,7 @@ use std::{
     process::Command,
 };
 
-use crate::state::{BrowserFile, HistoryItem};
+use crate::state::{BrowserFile, HistoryItem, RecentDir};
 
 /// Horizontal rule framing the paginated lists (history, recent dirs,
 /// bookmarks, remotes) in the CLI.
@@ -85,12 +85,12 @@ pub fn render_page<T>(
 }
 
 /// Render one page of command history. Lives in the shared lib (rather than
-/// the CLI's render module) so the Ctrl+H key handler and the `his p<N>`
+/// the CLI's render module) so the Ctrl+3 key handler and the `his p<N>`
 /// builtin print the identical frame.
 pub fn render_history(history: &[HistoryItem], page: usize) -> String {
     render_page(
         "Command History",
-        "Ctrl+H again: older page",
+        "Ctrl+3 again: older page",
         "Use `his <number>` to run, `his p<N>` to jump to a page; e.g. `his 4`",
         "(no history)",
         history,
@@ -98,6 +98,109 @@ pub fn render_history(history: &[HistoryItem], page: usize) -> String {
         DISP_PAGE_LEN,
         |i, item| format!("{i}:  {}", item.text),
     )
+}
+
+/// Absolute history indices for commands run in `cwd`, oldest first. Keeping
+/// the original indices makes `this N` agree with the GUI's history panel.
+pub fn history_indices_in_dir(history: &[HistoryItem], cwd: &Path) -> Vec<usize> {
+    history
+        .iter()
+        .enumerate()
+        .filter_map(|(i, item)| (item.dir == cwd).then_some(i))
+        .collect()
+}
+
+pub fn render_history_in_dir(history: &[HistoryItem], cwd: &Path, page: usize) -> String {
+    let indices = history_indices_in_dir(history, cwd);
+    render_page(
+        "Command History in this directory",
+        "Ctrl+4 again: older page",
+        "Use `this <number>` to run, `this p<N>` to jump to a page; e.g. `this 4`",
+        "(no history in this directory)",
+        &indices,
+        page,
+        DISP_PAGE_LEN,
+        |_, &i| format!("{i}:  {}", history[i].text),
+    )
+}
+
+/// Resolve an absolute index or the newest case-insensitive substring match.
+/// `cwd` limits both forms to commands entered in that directory.
+pub fn find_history_index(
+    history: &[HistoryItem],
+    cwd: Option<&Path>,
+    query: &str,
+) -> Option<usize> {
+    if let Ok(i) = query.parse::<usize>() {
+        return history
+            .get(i)
+            .filter(|item| cwd.is_none_or(|dir| item.dir == dir))
+            .map(|_| i);
+    }
+    let needle = query.to_lowercase();
+    history
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, item)| {
+            cwd.is_none_or(|dir| item.dir == dir) && item.text.to_lowercase().contains(&needle)
+        })
+        .map(|(i, _)| i)
+}
+
+pub fn find_bookmark(bookmarks: &[PathBuf], query: &str) -> Option<PathBuf> {
+    let needle = query.to_lowercase();
+    bookmarks
+        .iter()
+        .rev()
+        .find(|p| p.to_string_lossy().to_lowercase().contains(&needle))
+        .cloned()
+}
+
+pub fn find_recent_dir(recent: &[RecentDir], query: &str) -> Option<PathBuf> {
+    let needle = query.to_lowercase();
+    recent
+        .iter()
+        .rev()
+        .find(|r| r.path.to_string_lossy().to_lowercase().contains(&needle))
+        .map(|r| r.path.clone())
+}
+
+#[cfg(test)]
+mod history_tests {
+    use chrono::Utc;
+
+    use super::*;
+
+    #[test]
+    fn cwd_history_keeps_global_indices_and_pages_only_matches() {
+        let here = PathBuf::from("/work/here");
+        let elsewhere = PathBuf::from("/work/elsewhere");
+        let history: Vec<_> = (0..25)
+            .map(|i| HistoryItem {
+                text: format!("task {i}"),
+                dir: if i == 2 {
+                    elsewhere.clone()
+                } else {
+                    here.clone()
+                },
+                dt: Utc::now(),
+            })
+            .collect();
+
+        let first = render_history_in_dir(&history, &here, 0);
+        let second = render_history_in_dir(&history, &here, 1);
+        assert!(first.contains("24:  task 24"));
+        assert!(!first.lines().any(|line| line.starts_with("2:  ")));
+        assert!(second.contains("0:  task 0"));
+        assert!(!second.lines().any(|line| line.starts_with("2:  ")));
+        assert_eq!(find_history_index(&history, Some(&here), "2"), None);
+        assert_eq!(
+            find_history_index(&history, Some(&here), "TASK 2"),
+            Some(24)
+        );
+        assert_eq!(find_history_index(&history, None, "task 2"), Some(24));
+    }
 }
 
 /// Build a [`Command`] that won't make Windows allocate a console window for
@@ -125,7 +228,7 @@ pub fn quiet_command<S: AsRef<OsStr>>(program: S) -> Command {
 
 /// Resolve a `cd`/`cat`-style path argument against the shell's state:
 /// expands `~`/`~/...` to the home dir, treats real paths literally, and
-/// falls back to a case-insensitive prefix match against bookmarked
+/// falls back to a case-insensitive substring match against bookmarked
 /// directories. Infallible — unresolvable cases degrade to the literal
 /// `cwd`-joined path rather than erroring.
 ///
@@ -149,24 +252,12 @@ pub fn path_from_args(
     } else {
         // Try the literal path first so real subdirs / absolute paths
         // keep their normal meaning. If it isn't a directory, fall
-        // back to a prefix-match against bookmarked directories
-        // (matched against the bookmark's final path component,
-        // case-insensitive).
+        // back to a substring match against bookmarked directories.
         let literal = cwd.join(args);
         if literal.is_dir() {
             literal
         } else {
-            let needle = args.to_lowercase();
-            bookmarks
-                .iter()
-                .find(|p| {
-                    p.file_name()
-                        .and_then(|n| n.to_str())
-                        .map(|n| n.to_lowercase().starts_with(&needle))
-                        .unwrap_or(false)
-                })
-                .cloned()
-                .unwrap_or(literal)
+            find_bookmark(bookmarks, args).unwrap_or(literal)
         }
     }
 }

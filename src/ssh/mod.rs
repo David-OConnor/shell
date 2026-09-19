@@ -317,7 +317,7 @@ pub fn cmd_ssh(state: &mut State, state_path: &Path, args: &str) {
 pub fn render_remotes(remotes: &[RemoteTerminal], page: usize) -> String {
     crate::render_page(
         "Remotes",
-        "Ctrl+R again: older page",
+        "Ctrl+5 again: older page",
         "Use `ssh <number>` to connect, `remote del <number>` to delete; e.g. `ssh 0`",
         "(no saved remotes — add one with `remote add user@host`)",
         remotes,

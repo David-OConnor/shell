@@ -68,7 +68,7 @@ pub fn render_recent_dirs(
 ) -> String {
     render_page(
         "Recent directories",
-        "Ctrl+O again: older page",
+        "Ctrl+2 again: older page",
         "Use `cd <number>` to go; e.g. `cd 4`",
         "(no recent directories)",
         recent,
@@ -84,7 +84,7 @@ pub fn render_recent_dirs(
 pub fn render_bookmarks(bookmarks: &[PathBuf], home: Option<&Path>, page: usize) -> String {
     render_page(
         "Bookmarks",
-        "Alt+B again: older page",
+        "Ctrl+1 again: older page",
         "Use `bm <number>` to go, `del bm <number>` to delete; e.g. `bm 4`",
         "(no bookmarks)",
         bookmarks,

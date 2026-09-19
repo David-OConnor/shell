@@ -25,7 +25,10 @@ use std::{
 
 use chrono::Utc;
 
-use crate::{HistoryItem, path_from_args, quiet_command, ssh, state::State};
+use crate::{
+    HistoryItem, find_bookmark, find_history_index, find_recent_dir, path_from_args, quiet_command,
+    ssh, state::State,
+};
 
 /// Which stream a chunk of output came from. Frontends use this to colour
 /// the line (stderr red, stdout default) and/or pick between stdout/stderr
@@ -219,34 +222,45 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
         None => (input, ""),
     };
 
-    // `his`/`hist <n>` re-runs a previous history item. Handle it before
-    // recording the meta-invocation so the user's history stays focused on
-    // the resolved command (which the recursive call below will record).
-    if cmd == "his" || cmd == "hist" {
-        // `his p<N>` jumps straight to a page of the history list (1-based,
-        // matching the header's `Page N/M`) instead of running an item.
-        if let Some(page) = args.strip_prefix('p').and_then(|n| n.parse::<usize>().ok()) {
+    // Handle history recall before recording the meta-invocation so the
+    // recursive call records only the command being re-run.
+    if cmd == "his" || cmd == "hist" || cmd == "this" {
+        let in_dir = cmd == "this";
+        let cwd = in_dir.then_some(state.cwd.as_path());
+        if args.is_empty() {
             if let Ok(h) = state.history.lock() {
-                print!("{}", crate::render_history(&h, page.saturating_sub(1)));
+                let rendered = if in_dir {
+                    crate::render_history_in_dir(&h, &state.cwd, 0)
+                } else {
+                    crate::render_history(&h, 0)
+                };
+                print!("{rendered}");
             }
             return true;
         }
-        match args.parse::<usize>() {
-            Ok(idx) => {
-                let resolved = state
-                    .history
-                    .lock()
-                    .ok()
-                    .and_then(|h| h.get(idx).map(|item| item.text.clone()));
-                match resolved {
-                    Some(text) => {
-                        println!("> {text}");
-                        return run_command(state, state_path, &text);
-                    }
-                    None => eprintln!("{cmd}: no history item at index {idx}"),
-                }
+        // `his/this p<N>` jumps straight to a page of the history list (1-based,
+        // matching the header's `Page N/M`) instead of running an item.
+        if let Some(page) = args.strip_prefix('p').and_then(|n| n.parse::<usize>().ok()) {
+            if let Ok(h) = state.history.lock() {
+                let rendered = if in_dir {
+                    crate::render_history_in_dir(&h, &state.cwd, page.saturating_sub(1))
+                } else {
+                    crate::render_history(&h, page.saturating_sub(1))
+                };
+                print!("{rendered}");
             }
-            Err(_) => eprintln!("{cmd}: usage: {cmd} <number>, or {cmd} p<page> to show a page"),
+            return true;
+        }
+        let resolved = state.history.lock().ok().and_then(|h| {
+            find_history_index(&h, cwd, args)
+                .and_then(|idx| h.get(idx).map(|item| item.text.clone()))
+        });
+        match resolved {
+            Some(text) => {
+                println!("> {text}");
+                return run_command(state, state_path, &text);
+            }
+            None => eprintln!("{cmd}: no matching history item for `{args}`"),
         }
         return true;
     }
@@ -299,7 +313,7 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
     }
 
     // Track directories we've run real commands from (everything except `cd`),
-    // so Ctrl+R / `cd <number>` can jump back to them. We always save below
+    // so Ctrl+2 / `cd <number>` can jump back to them. We always save below
     // regardless, to flush the new history entry to disk.
     if cmd != "cd" {
         let cwd = state.cwd.clone();
@@ -420,7 +434,7 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
 
         "del" => {
             // Delete a bookmark by its displayed index
-            // (the numbers shown by the Alt+B bookmark list).
+            // (the numbers shown by the Ctrl+1 bookmark list).
             let (sub, rest) = match args.find(char::is_whitespace) {
                 Some(i) => (&args[..i], args[i..].trim()),
                 None => (args, ""),
@@ -461,7 +475,7 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
 
         "cd" => {
             // `cd <number>` (with nothing else after) jumps to a recent
-            // directory by its Ctrl+R index. Anything else is resolved as a
+            // directory by its Ctrl+2 index. Anything else is resolved as a
             // normal path/bookmark argument.
             // When the arg parses as a number, we treat it as a recent-dir
             // index; remember the index so we can prune the entry if its
@@ -482,15 +496,16 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
             } else {
                 let bookmarks = state.dir_bookmarks.lock();
                 let slice: &[PathBuf] = bookmarks.as_deref().map(|v| v.as_slice()).unwrap_or(&[]);
-                (
-                    Some(path_from_args(
-                        state.home.as_deref(),
-                        &state.cwd,
-                        slice,
-                        args,
-                    )),
-                    None,
-                )
+                let mut target = path_from_args(state.home.as_deref(), &state.cwd, slice, args);
+                drop(bookmarks);
+                if !target.is_dir() && !args.is_empty() && !args.starts_with('~') {
+                    if let Ok(recent) = state.recent_dirs.lock() {
+                        if let Some(found) = find_recent_dir(&recent, args) {
+                            target = found;
+                        }
+                    }
+                }
+                (Some(target), None)
             };
 
             if let Some(target) = target {
@@ -524,26 +539,27 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
             }
         }
 
-        // `bm <number>`: jump to the bookmark at that Alt+B index. Mirrors
+        // `bm <number>`: jump to the bookmark at that Ctrl+1 index. Mirrors
         // `cd <number>` but indexes into the bookmark list instead of
         // recent_dirs.
-        "bm" => match args.parse::<usize>() {
-            Ok(idx) => {
-                let resolved = state
-                    .dir_bookmarks
-                    .lock()
-                    .ok()
-                    .and_then(|list| list.get(idx).cloned());
-                match resolved {
-                    Some(target) => match env::set_current_dir(&target) {
-                        Ok(_) => state.cwd = env::current_dir().unwrap_or(target),
-                        Err(e) => eprintln!("bm: {e}"),
-                    },
-                    None => eprintln!("bm: no bookmark at index {idx}"),
+        "bm" => {
+            let resolved = state.dir_bookmarks.lock().ok().and_then(|list| {
+                if let Ok(idx) = args.parse::<usize>() {
+                    list.get(idx).cloned()
+                } else if !args.is_empty() {
+                    find_bookmark(&list, args)
+                } else {
+                    None
                 }
+            });
+            match resolved {
+                Some(target) => match env::set_current_dir(&target) {
+                    Ok(_) => state.cwd = env::current_dir().unwrap_or(target),
+                    Err(e) => eprintln!("bm: {e}"),
+                },
+                None => eprintln!("bm: no matching bookmark for `{args}`"),
             }
-            Err(_) => eprintln!("bm: usage: bm <number>"),
-        },
+        }
 
         // `python` (or `python3`): when the current directory holds a virtual
         // environment, run that venv's interpreter instead of whatever `python`
@@ -695,10 +711,15 @@ pub fn shelp_text(frontend: Frontend) -> String {
         ("--version, -v", "Show the shell's version"),
         (
             "cd <path>",
-            "Change directory. Takes `~`, a real path, or the start of a bookmark's name",
+            "Change directory. Takes `~`, a real path, or part of a bookmark/recent path",
         ),
         ("cd <number>", "Go to a recent directory by its index"),
+        (
+            "cd <letters>",
+            "Go to a bookmark or recent path containing this text",
+        ),
         ("bm <number>", "Go to a bookmark by its index"),
+        ("bm <letters>", "Go to a bookmark containing this text"),
         ("del bm <number>", "Delete a bookmark by its index"),
         (
             "cat <file>",
@@ -708,14 +729,27 @@ pub fn shelp_text(frontend: Frontend) -> String {
             "his <number>",
             "Re-run a command from history (`hist` also works)",
         ),
+        (
+            "his <letters>",
+            "Re-run the newest command containing this text",
+        ),
+        (
+            "this <number>",
+            "Re-run a command entered in the current directory",
+        ),
+        (
+            "this <letters>",
+            "Re-run the newest matching command in this directory",
+        ),
     ];
-    if cli {
-        // The GUI shows history in a panel, so it has no page-jump form.
-        commands.push((
-            "his p<page>",
-            "Show a page of the history list; page 1 is the newest",
-        ));
-    }
+    commands.push((
+        "his p<page>",
+        "Show a page of history; page 1 is the newest",
+    ));
+    commands.push((
+        "this p<page>",
+        "Show a page of history in the current directory",
+    ));
     commands.extend_from_slice(&[
         (
             "hisd <number>",
@@ -789,10 +823,11 @@ pub fn shelp_text(frontend: Frontend) -> String {
                 "Accept the dimmed autosuggestion at the end of the line",
             ),
             ("Ctrl + B", "Bookmark the current directory"),
-            ("Alt + B, or Ctrl + 1", "List bookmarks"),
-            ("Ctrl + O, or Ctrl + 2", "List recent directories"),
-            ("Ctrl + H, or Ctrl + 3", "List command history"),
-            ("Ctrl + R, or Ctrl + 4", "List saved SSH remotes"),
+            ("Ctrl + 1", "List bookmarks"),
+            ("Ctrl + 2", "List recent directories"),
+            ("Ctrl + 3", "List command history"),
+            ("Ctrl + 4", "List history in the current directory"),
+            ("Ctrl + 5", "List saved SSH remotes"),
             ("Ctrl + ]", "Leave an interactive (PTY) remote shell"),
             ("Ctrl + C", "Cancel the current input"),
             ("Ctrl + D", "Exit"),
@@ -816,7 +851,7 @@ pub fn shelp_text(frontend: Frontend) -> String {
     if cli {
         out.push_str(
             "\nPress a list's keystroke again to page back through older entries.\n\
-             The Ctrl + 1-4 aliases are Windows-only.\n",
+             Ctrl + 1-5 are available in the Windows terminal.\n",
         );
     }
     out

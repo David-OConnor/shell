@@ -32,21 +32,26 @@ somewhere convenient, and add it to the system path; then you can launch by typi
 - `shelp`: Show all commands and key shortcuts.
 
 - Ctrl + B: Bookmark the current directory.
-- Alt + B or Ctrl + 1: Show all directory bookmarks
+- Ctrl + 1: Show all directory bookmarks
 - `bm <number>` (e.g. `bm 2`): Go to this number in the bookmarks
 - `bm <a few letters>` to go to a bookmark that contains these letters
 
-- Ctrl + O or Ctrl + 2: Show recent directories
+- Ctrl + 2: Show recent directories
 - `cd <number>` (e.g. `cd 2`): Go to this number in the recent directories
 - `cd <a few letters>` to go to a recent directory that contains these letters
 
-- Ctrl + H or Ctrl + 3: Show command history. Press again to page through older entries
+- Ctrl + 3: Show command history. Press again to page through older entries
 - `his <number>` (e.g. `his 2`): Go to this number in the history
 - `his p<page>` (e.g. `his p2`): Jump to a page of the history list
 - `his <a few letters>` to go to a recent command that contains these letters
 
+- Ctrl + 4: Show command history in the current directory. Press again to page through older entries
+- `this <number>` (e.g. `this 2`): Go to this number in the history
+- `this p<page>` (e.g. `this p2`): Jump to a page of the history list
+- `this <a few letters>` to go to a recent command that contains these letters
+
 - `remote add username@host`: Add a remote
-- Ctrl + R or Ctrl + 4 (or `remote list`): Show remotes
+- Ctrl + 5 (or `remote list`): Show remotes
 - `ssh 2` Go to #2 on the remotes list
 - `cd cod` + Tab: Go to a bookmark or recent directory that contains these letters, e.g ~/code
 
@@ -113,12 +118,17 @@ Run `logs <service>`, to view the recent Journalctl logs. Linux only. For exampl
 - `logs`: Runs journalctl -u -f with the service.
 - `del bm <number>`: Delete a bookmark by number. 
 - `his <number>`: Execute a command from history.
+- `his <letters>`: Execute the newest command containing those letters.
 - `his p<page>` (e.g. `his p2`): Show a page of the history list; page 1 is the most recent.
+- `this <number>` or `this <letters>`: Execute a matching history command from the current directory.
+- `this p<page>` (e.g. `this p2`): Show a page of history from the current directory.
 - `hisd <number>`: Execute a command from history, in its original working dir.
 - `cat`: Displays the contents of a (generally text) file. Similar to the standard Linux operation, but
 also works on Windows.
-- `cd <number>`: Go to this recent directory (As listed with Ctrl + O). For bookmarks, use `bm <number>`.
-- `bm <number>`: Go to this bookmark (As listed with Alt + B)
+- `cd <number>`: Go to this recent directory (as listed with Ctrl + 2). For bookmarks, use `bm <number>`.
+- `bm <number>`: Go to this bookmark (as listed with Ctrl + 1).
+- `bm <letters>`: Go to a bookmark whose path contains those letters.
+- `cd <letters>`: Go to a bookmarked or recent directory whose path contains those letters.
 - `cd <part-of-path>` + Tab key: Go to this directory history item
 
 
@@ -131,7 +141,7 @@ The shell handles `ssh` itself (in-process, via the `russh` library) instead of 
 - `ssh [user@]host [port]` or `ssh <number>`: Connect to a host, or to a saved
   remote by its `remote list` index. On first connect you're prompted for a
   password (entered hidden), which is then saved to the keyring.
-- `remote list` (or Ctrl + R): List saved remotes with their indices.
+- `remote list` (or Ctrl + 5): List saved remotes with their indices.
 - `remote add [user@]host[:port]`: Save a remote (prompts for a password to store).
 - `remote del <number>`: Remove a saved remote (and its keyring password).
 - While connected, typed commands run on the remote. Two modes:
@@ -155,20 +165,20 @@ The shell handles `ssh` itself (in-process, via the `russh` library) instead of 
 
 ### Recent or frequent commands
 - Ctrl + B: Bookmark the current directory.
-- Ctrl + O or Ctrl + 2: List the most recent directories a command has been executed from.
-- Ctrl + H or Ctrl + 3: List the most recent commands executed.
-- Ctrl + R or Ctrl + 4: List saved SSH remotes.
+- Ctrl + 2: List the most recent directories a command has been executed from.
+- Ctrl + 3: List the most recent commands executed.
+- Ctrl + 4: List commands entered in the current directory.
+- Ctrl + 5: List saved SSH remotes.
 
-- Alt + B or Ctrl + 1: List all bookmarks.
+- Ctrl + 1: List all bookmarks.
 - Ctrl + D: Exit
 
-Note: the Ctrl + 1–4 aliases work on Windows only (via a small patch to the
-bundled line editor — see `vendor/rustyline`). Unix terminals cannot transmit
-Ctrl + digit, so use the letter chords there.
+Note: Ctrl + 1–5 work in the Windows terminal via the bundled line editor.
+Most Unix terminals cannot transmit Ctrl + digit; use the typed commands there.
 
 These lists are paginated (newest items first). Press the same keystroke again
 to step to the next (older) page, wrapping back to the first page after the
-last. For history, `his p<number>` jumps straight to a page.
+last. For history, `his p<number>` or `this p<number>` jumps straight to a page.
 
 
 ### General terminal commands
