@@ -514,7 +514,8 @@ impl ShowListHandler {
         match self.kind {
             NavKind::History => {
                 let h = self.history.lock().ok()?;
-                let page = requested % page_count(h.len(), DISP_PAGE_LEN);
+                let count = shell::history_latest_indices(&h).len();
+                let page = requested % page_count(count, DISP_PAGE_LEN);
                 Some((shell::render_history(&h, page), page))
             }
             NavKind::HistoryInDir => {
@@ -636,8 +637,8 @@ fn main() {
     // session. Our own ↑/↓ recall reads `state.history` directly and is
     // unaffected.
     if let Ok(history) = state.history.lock() {
-        for item in history.iter() {
-            let _ = rl.add_history_entry(&item.text);
+        for i in shell::history_latest_indices(&history) {
+            let _ = rl.add_history_entry(&history[i].text);
         }
     }
 

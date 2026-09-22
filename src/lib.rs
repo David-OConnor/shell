@@ -20,10 +20,10 @@ pub use python::{VENV_PREFIX, venv_python};
 pub use ssh::{RemoteSession, SshMode};
 pub use state::{
     BrowserFile, HistoryItem, NavState, OpenTabs, PanelVis, RecentDir, RemoteTerminal, WindowSize,
-    record_recent_dir,
+    dedup_history, record_history, record_recent_dir,
 };
 pub use util::{
     DISP_PAGE_LEN, DIVIDER, find_bookmark, find_history_index, find_recent_dir, get_home,
-    history_indices_in_dir, page_count, path_from_args, quiet_command, read_browser_files,
-    render_history, render_history_in_dir, render_page,
+    history_indices_in_dir, history_latest_indices, page_count, path_from_args, quiet_command,
+    read_browser_files, render_history, render_history_in_dir, render_page,
 };

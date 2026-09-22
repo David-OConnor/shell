@@ -350,6 +350,8 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
         }
         // Unknown tags are ignored on purpose for forward compatibility.
     }
+    crate::state::dedup_history(&mut history);
+
     Ok(LoadedState {
         bookmarks,
         recent_dirs,

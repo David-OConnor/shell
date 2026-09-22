@@ -1,6 +1,7 @@
 //! Misc utility functionality.
 
 use std::{
+    collections::HashSet,
     env,
     ffi::OsStr,
     fs,
@@ -84,19 +85,36 @@ pub fn render_page<T>(
     msg
 }
 
+/// Absolute history indices of the newest entry for each distinct command
+/// text, oldest first. History keeps one entry per command-in-directory (so
+/// Ctrl+4 works per directory); the all-directories view uses this to show a
+/// command run in several directories only once.
+pub fn history_latest_indices(history: &[HistoryItem]) -> Vec<usize> {
+    let mut seen = HashSet::new();
+    let mut indices: Vec<usize> = history
+        .iter()
+        .enumerate()
+        .rev()
+        .filter_map(|(i, item)| seen.insert(item.text.as_str()).then_some(i))
+        .collect();
+    indices.reverse();
+    indices
+}
+
 /// Render one page of command history. Lives in the shared lib (rather than
 /// the CLI's render module) so the Ctrl+3 key handler and the `his p<N>`
 /// builtin print the identical frame.
 pub fn render_history(history: &[HistoryItem], page: usize) -> String {
+    let indices = history_latest_indices(history);
     render_page(
         "Command History",
         "Ctrl+3 again: older page",
         "Use `his <number>` to run, `his p<N>` to jump to a page; e.g. `his 4`",
         "(no history)",
-        history,
+        &indices,
         page,
         DISP_PAGE_LEN,
-        |i, item| format!("{i}:  {}", item.text),
+        |_, &i| format!("{i}:  {}", history[i].text),
     )
 }
 
@@ -200,6 +218,55 @@ mod history_tests {
             Some(24)
         );
         assert_eq!(find_history_index(&history, None, "task 2"), Some(24));
+    }
+
+    #[test]
+    fn history_dedups_per_dir_and_hides_cross_dir_repeats_globally() {
+        use crate::state::{dedup_history, record_history};
+
+        let a = PathBuf::from("/a");
+        let b = PathBuf::from("/b");
+        let mut history = Vec::new();
+        record_history(&mut history, "build", &a);
+        record_history(&mut history, "git pull", &a);
+        record_history(&mut history, "build", &a);
+        record_history(&mut history, "build", &b);
+
+        // Re-running in the same dir moves the command to the end; the same
+        // text in another dir is kept as its own entry.
+        let texts: Vec<_> = history
+            .iter()
+            .map(|h| (h.text.as_str(), h.dir.clone()))
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                ("git pull", a.clone()),
+                ("build", a.clone()),
+                ("build", b.clone())
+            ]
+        );
+
+        // Ctrl+4 in /a lists each of its commands once.
+        assert_eq!(history_indices_in_dir(&history, &a), [0, 1]);
+        // Ctrl+3 shows `build` only once, at its newest position.
+        assert_eq!(history_latest_indices(&history), [0, 2]);
+        let global = render_history(&history, 0);
+        assert!(global.contains("2:  build"));
+        assert!(!global.lines().any(|line| line.starts_with("1:  ")));
+
+        // Loading an older, un-deduped file keeps the newest of each.
+        let mut loaded: Vec<_> = ["x", "y", "x", "x"]
+            .iter()
+            .map(|t| HistoryItem {
+                text: t.to_string(),
+                dir: a.clone(),
+                dt: Utc::now(),
+            })
+            .collect();
+        dedup_history(&mut loaded);
+        let texts: Vec<_> = loaded.iter().map(|h| h.text.as_str()).collect();
+        assert_eq!(texts, ["y", "x"]);
     }
 }
 

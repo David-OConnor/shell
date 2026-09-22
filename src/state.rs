@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     env, io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -7,8 +8,8 @@ use std::{
 use chrono::{DateTime, Utc};
 
 use crate::{
-    current_branch, get_home, git::branch_indicator, read_browser_files, save_data,
-    ssh::RemoteSession,
+    current_branch, get_home, git::branch_indicator, history_latest_indices, read_browser_files,
+    save_data, ssh::RemoteSession,
 };
 
 // todo: Instead of storing these Arc<Mutex>>s, perhaps we do it some other way; this is due
@@ -391,12 +392,12 @@ impl NavState {
             live_input.to_string()
         };
 
-        // Absolute indices of matching entries, oldest → newest.
-        let matches: Vec<usize> = history
-            .iter()
-            .enumerate()
-            .filter(|(_, item)| prefix.is_empty() || item.text.starts_with(&prefix))
-            .map(|(i, _)| i)
+        // Absolute indices of matching entries, oldest → newest. Only the
+        // newest run of each command text, so the same command entered in
+        // several directories isn't stepped through repeatedly.
+        let matches: Vec<usize> = history_latest_indices(history)
+            .into_iter()
+            .filter(|&i| prefix.is_empty() || history[i].text.starts_with(&prefix))
             .collect();
         if matches.is_empty() {
             return None;
@@ -523,6 +524,34 @@ pub fn record_recent_dir(recent: &Arc<Mutex<Vec<RecentDir>>>, cwd: &Path) {
             dt: Utc::now(),
         });
     }
+}
+
+/// Record a command in the history. Any older entry with the same text *and*
+/// directory is dropped first, so each command-in-directory appears once, at
+/// its most recent position with a fresh timestamp. The same text run in a
+/// different directory is kept, since Ctrl+4 / `this` list per directory.
+pub fn record_history(history: &mut Vec<HistoryItem>, text: &str, dir: &Path) {
+    history.retain(|item| item.text != text || item.dir != dir);
+    history.push(HistoryItem {
+        text: text.to_string(),
+        dir: dir.to_path_buf(),
+        dt: Utc::now(),
+    });
+}
+
+/// Collapse existing duplicate command-in-directory entries, keeping the most
+/// recent of each. Applied on load so history saved before
+/// [record_history] deduped is cleaned up too.
+pub fn dedup_history(history: &mut Vec<HistoryItem>) {
+    let mut seen = HashSet::new();
+    let mut keep: Vec<bool> = history
+        .iter()
+        .rev()
+        .map(|item| seen.insert((item.text.as_str(), item.dir.as_path())))
+        .collect();
+    keep.reverse();
+    let mut keep = keep.into_iter();
+    history.retain(|_| keep.next().unwrap_or(true));
 }
 
 /// Build a ` <prefix> N` indicator (with leading space) or empty string.

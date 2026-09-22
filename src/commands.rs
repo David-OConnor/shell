@@ -23,11 +23,9 @@ use std::{
     process::Command,
 };
 
-use chrono::Utc;
-
 use crate::{
-    HistoryItem, find_bookmark, find_history_index, find_recent_dir, path_from_args, quiet_command,
-    ssh, state::State,
+    find_bookmark, find_history_index, find_recent_dir, path_from_args, quiet_command, ssh,
+    state::State,
 };
 
 /// Which stream a chunk of output came from. Frontends use this to colour
@@ -305,11 +303,7 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
     }
 
     if let Ok(mut hist) = state.history.lock() {
-        hist.push(HistoryItem {
-            text: input.to_string(),
-            dir: state.cwd.clone(),
-            dt: Utc::now(),
-        });
+        crate::record_history(&mut hist, input, &state.cwd);
     }
 
     // Track directories we've run real commands from (everything except `cd`),
