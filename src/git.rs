@@ -9,7 +9,7 @@ use crate::quiet_command;
 /// truncate.
 const BRANCH_NAME_MAX: usize = 10;
 
-pub const BRANCH_PREFIX: &str = " branch: ";
+pub const BRANCH_PREFIX: &str = " br: ";
 
 /// Detect the current git branch; used for displaying prior to the input prompt.
 pub fn current_branch(cwd: &Path) -> Option<String> {

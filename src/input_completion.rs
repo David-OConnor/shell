@@ -74,13 +74,32 @@ pub fn complete_cd_path(
     let arg = rest.trim_start();
     let arg_start = leading + (trimmed.len() - arg.len());
 
-    let mut candidates = complete_bookmarks(arg, home, bookmarks);
-    if candidates.is_empty() && !arg.is_empty() {
-        candidates = complete_recent_dirs(arg, home, recent_dirs);
-    }
-    if candidates.is_empty() {
-        candidates = complete_dirs(arg, cwd, home);
-    }
+    // Sources in priority order. Match quality ranks first, so a prefix match
+    // in the cwd beats a fuzzy match against a bookmark or recent dir; within
+    // the same quality, the earlier source wins.
+    let recent = if arg.is_empty() {
+        Vec::new()
+    } else {
+        complete_recent_dirs(arg, home, recent_dirs)
+    };
+    let sources = [
+        complete_bookmarks(arg, home, bookmarks),
+        scored_paths(arg, cwd, home, true),
+        recent,
+    ];
+
+    let candidates = (0..=2)
+        .find_map(|tier| {
+            sources.iter().find_map(|source| {
+                let hits: Vec<CompletionCandidate> = source
+                    .iter()
+                    .filter(|(score, _)| match_tier(*score) == tier)
+                    .map(|(_, c)| c.clone())
+                    .collect();
+                (!hits.is_empty()).then_some(hits)
+            })
+        })
+        .unwrap_or_default();
 
     Some(CompletionResult {
         start: arg_start,
@@ -88,11 +107,21 @@ pub fn complete_cd_path(
     })
 }
 
+/// Coarse match quality from a [match_score]: 0 = prefix, 1 = substring,
+/// 2 = subsequence (fuzzy).
+fn match_tier(score: u32) -> u8 {
+    match score {
+        0 => 0,
+        s if s < SUBSEQ_SCORE => 1,
+        _ => 2,
+    }
+}
+
 fn complete_recent_dirs(
     arg: &str,
     home: Option<&Path>,
     recent_dirs: &[RecentDir],
-) -> Vec<CompletionCandidate> {
+) -> Vec<(u32, CompletionCandidate)> {
     let mut scored: Vec<(u32, CompletionCandidate)> = recent_dirs
         .iter()
         .filter_map(|r| {
@@ -109,7 +138,7 @@ fn complete_recent_dirs(
         })
         .collect();
     sort_scored(&mut scored);
-    scored.into_iter().map(|(_, c)| c).collect()
+    scored
 }
 
 #[cfg(test)]
@@ -128,13 +157,27 @@ mod recent_completion_tests {
         assert_eq!(result.candidates.len(), 1);
         assert!(result.candidates[0].replacement.ends_with("code"));
     }
+
+    #[test]
+    fn local_prefix_beats_fuzzy_recent_directory() {
+        let cwd = std::env::temp_dir().join("shell_completion_test_local_prefix");
+        fs::create_dir_all(cwd.join("openmm")).unwrap();
+        let recent = vec![RecentDir {
+            path: PathBuf::from("/code/position_mesh/position_mesh_x"),
+            dt: Utc::now(),
+        }];
+        let result = complete_cd_path("cd openm", 8, &cwd, None, &[], &recent).unwrap();
+        let _ = fs::remove_dir_all(&cwd);
+        assert_eq!(result.candidates.len(), 1);
+        assert_eq!(result.candidates[0].replacement, "openmm");
+    }
 }
 
 fn complete_bookmarks(
     arg: &str,
     home: Option<&Path>,
     bookmarks: &[PathBuf],
-) -> Vec<CompletionCandidate> {
+) -> Vec<(u32, CompletionCandidate)> {
     let mut scored: Vec<(u32, CompletionCandidate)> = bookmarks
         .iter()
         .filter_map(|p| {
@@ -150,7 +193,7 @@ fn complete_bookmarks(
         })
         .collect();
     sort_scored(&mut scored);
-    scored.into_iter().map(|(_, c)| c).collect()
+    scored
 }
 
 /// Complete a command (or argument) written as an explicit path — one starting
@@ -205,10 +248,6 @@ fn is_explicit_path(word: &str) -> bool {
         && (bytes[2] == b'/' || bytes[2] == b'\\')
 }
 
-fn complete_dirs(arg: &str, cwd: &Path, home: Option<&Path>) -> Vec<CompletionCandidate> {
-    complete_paths(arg, cwd, home, true)
-}
-
 /// Complete the leaf of `arg` against the directory it points into. When
 /// `dirs_only` is set only subdirectories are offered (used by `cd`); otherwise
 /// files are offered too and directory names get a trailing `/` so completing
@@ -219,6 +258,19 @@ fn complete_paths(
     home: Option<&Path>,
     dirs_only: bool,
 ) -> Vec<CompletionCandidate> {
+    scored_paths(arg, cwd, home, dirs_only)
+        .into_iter()
+        .map(|(_, c)| c)
+        .collect()
+}
+
+/// [complete_paths], keeping each candidate's [match_score], best-first.
+fn scored_paths(
+    arg: &str,
+    cwd: &Path,
+    home: Option<&Path>,
+    dirs_only: bool,
+) -> Vec<(u32, CompletionCandidate)> {
     let (dir_prefix, base_dir, leaf_prefix) = completion_base(arg, cwd, home);
     let entries = match fs::read_dir(base_dir) {
         Ok(entries) => entries,
@@ -247,7 +299,7 @@ fn complete_paths(
         })
         .collect();
     sort_scored(&mut scored);
-    scored.into_iter().map(|(_, c)| c).collect()
+    scored
 }
 
 /// Score how well candidate `name` matches the typed `needle`, compared
