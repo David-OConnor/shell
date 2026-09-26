@@ -802,7 +802,7 @@ pub fn shelp_text(frontend: Frontend) -> String {
             ("Enter", "Run the input"),
             (
                 "Tab",
-                "Autocomplete: bookmarks and directories after `cd`, filenames otherwise",
+                "Autocomplete: bookmarks, directories, and dirs under bookmarks after `cd`, filenames otherwise",
             ),
             (
                 "Up / Down",

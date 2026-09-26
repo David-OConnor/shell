@@ -78,7 +78,7 @@ As you type, Shell shows a dimmed (grey) suggestion after the cursor: the most r
 
 
 ### Tab completion
-Tab completes the `cd` argument against your bookmarks first, then directories on disk (including nested paths like `code/Bi`). Other commands fall back to filename completion in the current directory.
+Tab completes the `cd` argument against your bookmarks first, then directories on disk (including nested paths like `code/Bi`), then recent directories, then directories nested anywhere under a bookmark (up to 4 levels deep). For example, with `~/code/Bio` bookmarked, `cd plasc` + Tab completes to `~/code/Bio/plascad` from any directory. Other commands fall back to filename completion in the current directory.
 
 
 ## Syntax highlighting

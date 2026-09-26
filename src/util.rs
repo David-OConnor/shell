@@ -167,21 +167,45 @@ pub fn find_history_index(
 }
 
 pub fn find_bookmark(bookmarks: &[PathBuf], query: &str) -> Option<PathBuf> {
-    let needle = query.to_lowercase();
-    bookmarks
-        .iter()
-        .rev()
-        .find(|p| p.to_string_lossy().to_lowercase().contains(&needle))
-        .cloned()
+    best_path_match(bookmarks.iter().map(PathBuf::as_path), query).map(Path::to_path_buf)
 }
 
 pub fn find_recent_dir(recent: &[RecentDir], query: &str) -> Option<PathBuf> {
+    best_path_match(recent.iter().map(|r| r.path.as_path()), query).map(Path::to_path_buf)
+}
+
+/// The entry of `paths` that best matches `query`, case-insensitively. The
+/// directory name is checked first: a name prefix beats a name substring, and
+/// within each the shorter name wins, so an exact name comes first (`shell`
+/// picks `~/code/shell` over `~/code/shell_gui`). Failing that, any substring
+/// of the full path matches. Remaining ties go to the last entry: the newest
+/// bookmark or most recent dir.
+fn best_path_match<'a>(
+    paths: impl DoubleEndedIterator<Item = &'a Path>,
+    query: &str,
+) -> Option<&'a Path> {
     let needle = query.to_lowercase();
-    recent
-        .iter()
+    paths
         .rev()
-        .find(|r| r.path.to_string_lossy().to_lowercase().contains(&needle))
-        .map(|r| r.path.clone())
+        .filter_map(|p| {
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            let rank = if name.starts_with(&needle) {
+                (0, name.len())
+            } else if name.contains(&needle) {
+                (1, name.len())
+            } else if p.to_string_lossy().to_lowercase().contains(&needle) {
+                (2, 0)
+            } else {
+                return None;
+            };
+            Some((rank, p))
+        })
+        // `min_by_key` keeps the first of equal minimums: the latest entry.
+        .min_by_key(|(rank, _)| *rank)
+        .map(|(_, p)| p)
 }
 
 #[cfg(test)]
@@ -429,4 +453,23 @@ pub fn get_home() -> Option<PathBuf> {
     env::var_os("USERPROFILE")
         .or_else(|| env::var_os("HOME"))
         .map(PathBuf::from)
+}
+
+#[cfg(test)]
+mod find_path_tests {
+    use super::*;
+
+    #[test]
+    fn closest_name_beats_newer_bookmark() {
+        let bookmarks = [
+            PathBuf::from("/code/shell"),
+            PathBuf::from("/code/shell_gui"),
+        ];
+        let find = |q| find_bookmark(&bookmarks, q).unwrap();
+        assert_eq!(find("shell"), bookmarks[0]);
+        assert_eq!(find("SHEL"), bookmarks[0]);
+        assert_eq!(find("shell_"), bookmarks[1]);
+        // Only the full path matches, so the newest bookmark wins.
+        assert_eq!(find("code"), bookmarks[1]);
+    }
 }

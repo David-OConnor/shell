@@ -1,8 +1,10 @@
 //! Logic related to auto-completing text as the user types, or with the Tab key.
 
 use std::{
+    collections::{HashSet, VecDeque},
     fs,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 use crate::{RecentDir, util};
@@ -46,8 +48,9 @@ pub fn apply_completion(line: &str, pos: usize, completion: &CompletionResult) -
 }
 
 /// Shared `cd` autocomplete used by both the CLI and GUI frontends. It
-/// completes bookmarked directory names first, then recent directories, then
-/// directory entries on disk, including nested relative paths like `code/Bi`.
+/// completes bookmarked directory names first, then directory entries on disk
+/// (including nested relative paths like `code/Bi`), then recent directories,
+/// then directories nested anywhere under a bookmark.
 pub fn complete_cd_path(
     line: &str,
     pos: usize,
@@ -82,11 +85,18 @@ pub fn complete_cd_path(
     } else {
         complete_recent_dirs(arg, home, recent_dirs)
     };
-    let sources = [
+    let mut sources = vec![
         complete_bookmarks(arg, home, bookmarks),
         scored_paths(arg, cwd, home, true),
         recent,
     ];
+    // The bookmark-subtree walk is the one costly source, so skip it when a
+    // cheaper source already has a prefix match: it could never win then.
+    // Bare names only; paths like `code/Bi` or `~/x` are resolved on disk.
+    let bare_name = !arg.is_empty() && !arg.starts_with('~') && !arg.contains(['/', '\\']);
+    if bare_name && !sources.iter().flatten().any(|(score, _)| *score == 0) {
+        sources.push(complete_bookmark_descendants(arg, home, bookmarks));
+    }
 
     let candidates = (0..=2)
         .find_map(|tier| {
@@ -194,6 +204,132 @@ fn complete_bookmarks(
         .collect();
     sort_scored(&mut scored);
     scored
+}
+
+/// How many levels below each bookmark [complete_bookmark_descendants] looks.
+const DESCENDANT_MAX_DEPTH: usize = 4;
+
+/// Wall-clock cap on the bookmark-subtree walk, so a huge tree (e.g. a
+/// bookmarked home dir) or a slow network drive can't stall the Tab key.
+const DESCENDANT_TIME_BUDGET: Duration = Duration::from_millis(300);
+
+/// Directories the bookmark-subtree walk never enters: build output and
+/// dependency trees, which are large and never a useful `cd` suggestion.
+const DESCENDANT_SKIP: [&str; 5] = [
+    "node_modules",
+    "target",
+    "__pycache__",
+    "venv",
+    "site-packages",
+];
+
+/// Complete against directories nested under any bookmark, so `cd plasc`
+/// finds `~/code/Bio/plascad` when `~/code/Bio` is bookmarked. Walks all
+/// bookmarks breadth-first together, so a directory under nested bookmarks is
+/// visited once, at its shallowest depth. Only prefix and substring matches
+/// count: fuzzy matching across whole trees hits almost anything.
+///
+/// Returns only the shallowest matches of the best quality: a deeper namesake
+/// (e.g. an asset folder named after its project) would otherwise stop Tab
+/// completing the obvious one.
+fn complete_bookmark_descendants(
+    arg: &str,
+    home: Option<&Path>,
+    bookmarks: &[PathBuf],
+) -> Vec<(u32, CompletionCandidate)> {
+    let deadline = Instant::now() + DESCENDANT_TIME_BUDGET;
+    // Bookmarks themselves are covered by [complete_bookmarks]; marking them
+    // visited up front also stops one bookmark's walk re-entering another's.
+    let mut visited: HashSet<String> = bookmarks.iter().map(|p| visit_key(p)).collect();
+    let mut queue: VecDeque<(PathBuf, usize)> = bookmarks.iter().map(|p| (p.clone(), 0)).collect();
+    // (score, depth, candidate)
+    let mut found: Vec<(u32, usize, CompletionCandidate)> = Vec::new();
+    // Depth of the first prefix match. Once that depth is fully read, nothing
+    // deeper can be returned, so the walk stops.
+    let mut prefix_depth: Option<usize> = None;
+
+    while let Some((dir, depth)) = queue.pop_front() {
+        if prefix_depth.is_some_and(|d| depth >= d) || Instant::now() > deadline {
+            break;
+        }
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|t| t.is_dir()) || is_hidden(&entry) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if DESCENDANT_SKIP.contains(&name.as_str()) {
+                continue;
+            }
+            let path = entry.path();
+            if !visited.insert(visit_key(&path)) {
+                continue;
+            }
+            let child_depth = depth + 1;
+            if let Some(score) = match_score(arg, &name).filter(|&s| s < SUBSEQ_SCORE) {
+                if score == 0 && prefix_depth.is_none() {
+                    prefix_depth = Some(child_depth);
+                }
+                // Show the full path: names like `src` repeat across projects.
+                let replacement = util::render_with_tilde(&path, home);
+                found.push((
+                    score,
+                    child_depth,
+                    CompletionCandidate {
+                        display: replacement.clone(),
+                        replacement,
+                    },
+                ));
+            }
+            if child_depth < DESCENDANT_MAX_DEPTH {
+                queue.push_back((path, child_depth));
+            }
+        }
+    }
+
+    let Some(best) = found.iter().map(|(s, d, _)| (match_tier(*s), *d)).min() else {
+        return Vec::new();
+    };
+    let mut scored: Vec<(u32, CompletionCandidate)> = found
+        .into_iter()
+        .filter(|(s, d, _)| (match_tier(*s), *d) == best)
+        .map(|(s, _, c)| (s, c))
+        .collect();
+    sort_scored(&mut scored);
+    scored
+}
+
+/// Key for the subtree walk's visited set. Windows paths are
+/// case-insensitive, so `code\bio` and `code\Bio` must collide there.
+fn visit_key(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    if cfg!(windows) {
+        s.to_lowercase()
+    } else {
+        s.into_owned()
+    }
+}
+
+/// Dot-directories everywhere, plus directories with the Hidden attribute on
+/// Windows (e.g. `AppData`).
+fn is_hidden(entry: &fs::DirEntry) -> bool {
+    if entry.file_name().to_string_lossy().starts_with('.') {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+        if entry
+            .metadata()
+            .is_ok_and(|m| m.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Complete a command (or argument) written as an explicit path — one starting
@@ -402,4 +538,48 @@ fn truncate_to_common_prefix(a: &mut String, b: &str) {
         end = a_idx + a_ch.len_utf8();
     }
     a.truncate(end);
+}
+
+#[cfg(test)]
+mod descendant_completion_tests {
+    use super::*;
+
+    #[test]
+    fn tab_completes_directory_under_bookmark() {
+        let root = std::env::temp_dir().join("shell_completion_test_descendant");
+        let bookmark = root.join("code").join("Bio");
+        let cwd = root.join("elsewhere");
+        fs::create_dir_all(bookmark.join("plascad").join("src")).unwrap();
+        // A deeper namesake mustn't turn this into an ambiguous completion.
+        fs::create_dir_all(bookmark.join("site").join("images").join("plascad")).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        let result = complete_cd_path(
+            "cd plasc",
+            8,
+            &cwd,
+            None,
+            std::slice::from_ref(&bookmark),
+            &[],
+        )
+        .unwrap();
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(result.candidates.len(), 1);
+        assert_eq!(
+            result.candidates[0].replacement,
+            bookmark.join("plascad").display().to_string()
+        );
+    }
+
+    #[test]
+    fn local_prefix_beats_directory_under_bookmark() {
+        let root = std::env::temp_dir().join("shell_completion_test_descendant_local");
+        let bookmark = root.join("bm");
+        fs::create_dir_all(bookmark.join("plascad")).unwrap();
+        fs::create_dir_all(root.join("cwd").join("plascad_local")).unwrap();
+        let result =
+            complete_cd_path("cd plasc", 8, &root.join("cwd"), None, &[bookmark], &[]).unwrap();
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(result.candidates.len(), 1);
+        assert_eq!(result.candidates[0].replacement, "plascad_local");
+    }
 }
