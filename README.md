@@ -55,6 +55,8 @@ somewhere convenient, and add it to the system path; then you can launch by typi
 - `ssh 2` Go to #2 on the remotes list
 - `cd cod` + Tab: Go to a bookmark or recent directory that contains these letters, e.g ~/code
 
+- `pull`, `push`, `branch`, `commit`: Shorthand for `git pull`, `git push`, etc.
+
 - Use the arrow keys to navigate to recent items
 - Press Tab to autocomplete
 
@@ -101,6 +103,16 @@ sync A commit message
 
 Warning: This isn't suitable for all workflows. If you use git in a way where it isn't appropriate to sync all gitignored files, this may have unintended consequences!
 
+`pull`, `push`, `branch`, and `commit` are shorthand for the `git` command of the same name. Any arguments
+are passed through unchanged:
+
+```shell
+pull                     // git pull
+push origin main         // git push origin main
+branch -a                // git branch -a
+commit -m "A message"    // git commit -m "A message"
+```
+
 
 Shell will display the current git branch in the input terminal, if in a directory which hosts
 a git repo.
@@ -115,6 +127,7 @@ Run `logs <service>`, to view the recent Journalctl logs. Linux only. For exampl
 - `shelp`: List every command and key shortcut, one per line.
 - `exit` or `quit`: Exit the program.
 - `sync`: Run `git add .`, `git commit -am <the commit message>`, and `git push`.
+- `pull`, `push`, `branch`, `commit`: Aliases for `git pull`, `git push`, `git branch`, and `git commit`.
 - `logs`: Runs journalctl -u -f with the service.
 - `del bm <number>`: Delete a bookmark by number. 
 - `his <number>`: Execute a command from history.

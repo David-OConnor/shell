@@ -207,6 +207,23 @@ fn cat(path: &Path) {
     }
 }
 
+/// Bare commands that are shorthand for the `git` subcommand of the same name,
+/// e.g. `pull` runs `git pull`.
+pub const GIT_ALIASES: &[&str] = &["pull", "push", "branch", "commit"];
+
+/// If `cmd` is one of [GIT_ALIASES], the full `git` command line it stands
+/// for, with `args` passed through unchanged.
+pub fn expand_git_alias(cmd: &str, args: &str) -> Option<String> {
+    if !GIT_ALIASES.contains(&cmd) {
+        return None;
+    }
+    Some(if args.is_empty() {
+        format!("git {cmd}")
+    } else {
+        format!("git {cmd} {args}")
+    })
+}
+
 /// Runs one command line. Returns false if the shell should exit.
 pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
     let input = input.trim();
@@ -317,6 +334,12 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
     if let Err(e) = state.save(state_path) {
         eprintln!("warning: failed to save state: {e}");
     }
+
+    // Expand git shorthands (`pull` -> `git pull`, …) after recording history,
+    // so history keeps what the user typed. Done before the SSH branch so the
+    // remote, which has never heard of `pull`, receives the full git command.
+    let expanded = expand_git_alias(cmd, args);
+    let input = expanded.as_deref().unwrap_or(input);
 
     // While an SSH session is live, typed commands run on the remote rather
     // than locally. Only the session-management keywords are intercepted here;
@@ -752,6 +775,10 @@ pub fn shelp_text(frontend: Frontend) -> String {
         (
             "sync <message>",
             "`git add .`, then `git commit -am <message>`, then `git push`",
+        ),
+        (
+            "pull, push, branch, commit",
+            "Shorthand for `git pull`, `git push`, etc. Arguments are passed through",
         ),
         (
             "logs <service>",
