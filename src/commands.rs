@@ -209,7 +209,7 @@ fn cat(path: &Path) {
 
 /// Bare commands that are shorthand for the `git` subcommand of the same name,
 /// e.g. `pull` runs `git pull`.
-pub const GIT_ALIASES: &[&str] = &["pull", "push", "branch", "commit"];
+pub const GIT_ALIASES: &[&str] = &["pull", "push", "branch", "commit", "checkout"];
 
 /// If `cmd` is one of [GIT_ALIASES], the full `git` command line it stands
 /// for, with `args` passed through unchanged.
@@ -777,7 +777,7 @@ pub fn shelp_text(frontend: Frontend) -> String {
             "`git add .`, then `git commit -am <message>`, then `git push`",
         ),
         (
-            "pull, push, branch, commit",
+            "pull, push, branch, commit, checkout",
             "Shorthand for `git pull`, `git push`, etc. Arguments are passed through",
         ),
         (

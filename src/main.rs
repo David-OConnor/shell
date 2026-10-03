@@ -95,6 +95,7 @@ const BUILTINS: &[&str] = &[
     "push",
     "branch",
     "commit",
+    "checkout",
     "logs",
     "ssh",
     "remote",
