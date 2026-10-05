@@ -56,6 +56,7 @@ somewhere convenient, and add it to the system path; then you can launch by typi
 - `cd cod` + Tab: Go to a bookmark or recent directory that contains these letters, e.g ~/code
 
 - `pull`, `push`, `branch`, `commit`, `checkout`: Shorthand for `git pull`, `git push`, etc.
+- `run`, `build`, `fmt`: Shorthand for `cargo run`, `cargo build`, `cargo +nightly fmt`. `run release` runs `cargo run --release`.
 
 - Use the arrow keys to navigate to recent items
 - Press Tab to autocomplete
@@ -113,6 +114,17 @@ branch -a                // git branch -a
 commit -m "A message"    // git commit -m "A message"
 ```
 
+Likewise, `run`, `build`, and `fmt` are shorthand for `cargo run`, `cargo build`, and `cargo +nightly fmt`. Arguments
+are passed through, except that a leading `release` becomes `--release`:
+
+```shell
+run                      // cargo run
+run release              // cargo run --release
+build release            // cargo build --release
+run -- --some-flag       // cargo run -- --some-flag
+fmt                      // cargo +nightly fmt
+```
+
 
 Shell will display the current git branch in the input terminal, if in a directory which hosts
 a git repo.
@@ -128,6 +140,7 @@ Run `logs <service>`, to view the recent Journalctl logs. Linux only. For exampl
 - `exit` or `quit`: Exit the program.
 - `sync`: Run `git add .`, `git commit -am <the commit message>`, and `git push`.
 - `pull`, `push`, `branch`, `commit`, and `checkout`: Aliases for `git pull`, `git push`, `git branch`, and `git commit`.
+- `run`, `build`, and `fmt`: Aliases for `cargo run`, `cargo build`, and `cargo +nightly fmt`. `run release` runs `cargo run --release`.
 - `logs`: Runs journalctl -u -f with the service.
 - `del bm <number>`: Delete a bookmark by number. 
 - `his <number>`: Execute a command from history.

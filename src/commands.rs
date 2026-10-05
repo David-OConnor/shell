@@ -211,16 +211,36 @@ fn cat(path: &Path) {
 /// e.g. `pull` runs `git pull`.
 pub const GIT_ALIASES: &[&str] = &["pull", "push", "branch", "commit", "checkout"];
 
-/// If `cmd` is one of [GIT_ALIASES], the full `git` command line it stands
-/// for, with `args` passed through unchanged.
-pub fn expand_git_alias(cmd: &str, args: &str) -> Option<String> {
-    if !GIT_ALIASES.contains(&cmd) {
-        return None;
-    }
-    Some(if args.is_empty() {
-        format!("git {cmd}")
+/// Bare commands that are shorthand for a `cargo` command line, e.g. `run`
+/// runs `cargo run`.
+pub const CARGO_ALIASES: &[(&str, &str)] = &[
+    ("run", "cargo run"),
+    ("build", "cargo build"),
+    ("fmt", "cargo +nightly fmt"),
+];
+
+/// If `cmd` is one of [GIT_ALIASES] or [CARGO_ALIASES], the full command line
+/// it stands for, with `args` passed through. For cargo aliases, a leading
+/// bare `release` argument becomes `--release`, so `run release` runs
+/// `cargo run --release`.
+pub fn expand_alias(cmd: &str, args: &str) -> Option<String> {
+    let (prefix, args) = if GIT_ALIASES.contains(&cmd) {
+        (format!("git {cmd}"), args.to_owned())
+    } else if let Some((_, full)) = CARGO_ALIASES.iter().find(|(a, _)| *a == cmd) {
+        let args = match args.strip_prefix("release") {
+            Some(rest) if rest.is_empty() || rest.starts_with(char::is_whitespace) => {
+                format!("--release{rest}")
+            }
+            _ => args.to_owned(),
+        };
+        (full.to_string(), args)
     } else {
-        format!("git {cmd} {args}")
+        return None;
+    };
+    Some(if args.is_empty() {
+        prefix
+    } else {
+        format!("{prefix} {args}")
     })
 }
 
@@ -335,10 +355,11 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
         eprintln!("warning: failed to save state: {e}");
     }
 
-    // Expand git shorthands (`pull` -> `git pull`, …) after recording history,
-    // so history keeps what the user typed. Done before the SSH branch so the
-    // remote, which has never heard of `pull`, receives the full git command.
-    let expanded = expand_git_alias(cmd, args);
+    // Expand git/cargo shorthands (`pull` -> `git pull`, `run` -> `cargo run`,
+    // …) after recording history, so history keeps what the user typed. Done
+    // before the SSH branch so the remote, which has never heard of `pull`,
+    // receives the full command.
+    let expanded = expand_alias(cmd, args);
     let input = expanded.as_deref().unwrap_or(input);
 
     // While an SSH session is live, typed commands run on the remote rather
@@ -781,6 +802,10 @@ pub fn shelp_text(frontend: Frontend) -> String {
             "Shorthand for `git pull`, `git push`, etc. Arguments are passed through",
         ),
         (
+            "run, build, fmt",
+            "Shorthand for `cargo run`, `cargo build`, `cargo +nightly fmt`. `run release` adds `--release`",
+        ),
+        (
             "logs <service>",
             "Show a systemd service's journalctl logs. Linux only",
         ),
@@ -876,4 +901,40 @@ pub fn shelp_text(frontend: Frontend) -> String {
         );
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expands_aliases() {
+        assert_eq!(expand_alias("pull", "").as_deref(), Some("git pull"));
+        assert_eq!(
+            expand_alias("push", "origin main").as_deref(),
+            Some("git push origin main")
+        );
+        assert_eq!(expand_alias("run", "").as_deref(), Some("cargo run"));
+        assert_eq!(
+            expand_alias("run", "release").as_deref(),
+            Some("cargo run --release")
+        );
+        assert_eq!(
+            expand_alias("build", "release --bin x").as_deref(),
+            Some("cargo build --release --bin x")
+        );
+        assert_eq!(
+            expand_alias("run", "releases").as_deref(),
+            Some("cargo run releases")
+        );
+        assert_eq!(
+            expand_alias("run", "-- release").as_deref(),
+            Some("cargo run -- release")
+        );
+        assert_eq!(
+            expand_alias("fmt", "").as_deref(),
+            Some("cargo +nightly fmt")
+        );
+        assert_eq!(expand_alias("ls", ""), None);
+    }
 }
