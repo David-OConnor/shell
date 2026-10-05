@@ -2,6 +2,7 @@
 //! the GUI variant, which calls this as a library. It is not part of the CLI shell application, and
 //! this distinction would not exist if this project was only used for the [CLI] executable.
 
+mod cargo_targets;
 pub mod commands;
 mod git;
 mod input_completion;

@@ -314,7 +314,7 @@ fn visit_key(p: &Path) -> String {
 
 /// Dot-directories everywhere, plus directories with the Hidden attribute on
 /// Windows (e.g. `AppData`).
-fn is_hidden(entry: &fs::DirEntry) -> bool {
+pub(crate) fn is_hidden(entry: &fs::DirEntry) -> bool {
     if entry.file_name().to_string_lossy().starts_with('.') {
         return true;
     }

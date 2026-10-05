@@ -57,6 +57,7 @@ somewhere convenient, and add it to the system path; then you can launch by typi
 
 - `pull`, `push`, `branch`, `commit`, `checkout`: Shorthand for `git pull`, `git push`, etc.
 - `run`, `build`, `fmt`: Shorthand for `cargo run`, `cargo build`, `cargo +nightly fmt`. `run release` runs `cargo run --release`.
+- `rm_targets`: Find cargo `target` folders under the current directory, and delete them after confirming.
 
 - Use the arrow keys to navigate to recent items
 - Press Tab to autocomplete
@@ -130,6 +131,33 @@ Shell will display the current git branch in the input terminal, if in a directo
 a git repo.
 
 
+## Cleaning up cargo build folders
+Cargo's `target` folders hold build output only, and are recreated by the next build, but often take up several
+GB per project. Run `rm_targets` to find them all under the current directory, e.g. in `~/code`, and delete them:
+
+```shell
+rm_targets
+
+// Scanning C:\Users\you\code for cargo target folders...
+//
+//   2.31 GB   C:\Users\you\code\project_a\target
+//   0.79 GB   C:\Users\you\code\project_b\target
+//   0.09 GB   C:\Users\you\code\project_b\sub_crate\target
+//
+// 3 folders. Deleting them would free 3.19 GB.
+// Delete 3 folders? [y/N]
+```
+
+Each folder's size, and the total that deleting them would free, are shown in GB. Nothing is deleted unless you
+answer `y`. A folder counts as a cargo `target` folder when it's named `target`, and
+has a `Cargo.toml` beside it. Subfolders are searched too, so this finds the folders of sub-crates and workspace
+members. Hidden folders (e.g. `.git`), `node_modules`, and symlinks are skipped.
+
+The folders are deleted directly rather than with `cargo clean`, so exactly the listed folders get removed, even if
+a project sets a custom target directory, or its `Cargo.toml` no longer builds. If a folder can't be fully deleted,
+e.g. because a program built into it is still running, the error is shown, and the rest are still deleted.
+
+
 ### Linux: JournalCtl logs:
 Run `logs <service>`, to view the recent Journalctl logs. Linux only. For example, this runs:
 `sudo journalctl -u gunicorn -f` for the gunicorn service.
@@ -141,6 +169,7 @@ Run `logs <service>`, to view the recent Journalctl logs. Linux only. For exampl
 - `sync`: Run `git add .`, `git commit -am <the commit message>`, and `git push`.
 - `pull`, `push`, `branch`, `commit`, and `checkout`: Aliases for `git pull`, `git push`, `git branch`, and `git commit`.
 - `run`, `build`, and `fmt`: Aliases for `cargo run`, `cargo build`, and `cargo +nightly fmt`. `run release` runs `cargo run --release`.
+- `rm_targets`: Find cargo `target` folders under the current directory, list them with their sizes in GB, show the total that would be freed, and delete them after you confirm.
 - `logs`: Runs journalctl -u -f with the service.
 - `del bm <number>`: Delete a bookmark by number. 
 - `his <number>`: Execute a command from history.

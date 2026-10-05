@@ -408,6 +408,11 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
                 Some(cmd) => Some(cmd),
                 None => return true,
             },
+            // Deletes local folders; there's no remote command to translate it to.
+            "rm_targets" => {
+                eprintln!("rm_targets: only runs locally; disconnect first");
+                return true;
+            }
             _ => Some(input.to_string()),
         };
 
@@ -459,6 +464,8 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
             };
             logs(args, true, &mut sink);
         }
+
+        "rm_targets" => crate::cargo_targets::rm_targets(&state.cwd),
 
         // On linux, this is likely the same as the system `cat` command, but it works on Windows.
         // Another approach may be to only apply this branch on Windows.
@@ -805,6 +812,15 @@ pub fn shelp_text(frontend: Frontend) -> String {
             "run, build, fmt",
             "Shorthand for `cargo run`, `cargo build`, `cargo +nightly fmt`. `run release` adds `--release`",
         ),
+    ]);
+    // CLI-only: it asks for confirmation on stdin, which the GUI doesn't route.
+    if cli {
+        commands.push((
+            "rm_targets",
+            "Find cargo `target` folders under this directory, and delete them after confirming",
+        ));
+    }
+    commands.extend_from_slice(&[
         (
             "logs <service>",
             "Show a systemd service's journalctl logs. Linux only",
