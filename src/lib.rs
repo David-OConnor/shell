@@ -12,16 +12,16 @@ pub mod ssh;
 pub mod state;
 mod util;
 
-pub use git::{BRANCH_PREFIX, current_branch, truncate_branch};
+pub use git::{BRANCH_PREFIX, clone_root, current_branch, expand_clone, truncate_branch};
 pub use input_completion::{
-    CompletionCandidate, CompletionResult, apply_completion, complete_cd_path,
+    CompletionCandidate, CompletionResult, apply_completion, complete_cd_path, complete_clone_url,
     complete_command_path,
 };
 pub use python::{VENV_PREFIX, venv_python};
 pub use ssh::{RemoteSession, SshMode};
 pub use state::{
     BrowserFile, HistoryItem, NavState, OpenTabs, PanelVis, RecentDir, RemoteTerminal, WindowSize,
-    dedup_history, record_history, record_recent_dir,
+    dedup_history, record_clone_root, record_history, record_recent_dir,
 };
 pub use util::{
     DISP_PAGE_LEN, DIVIDER, find_bookmark, find_history_index, find_recent_dir, get_home,

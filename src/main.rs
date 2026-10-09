@@ -21,7 +21,7 @@ use rustyline::{
 };
 use shell::{
     DISP_PAGE_LEN, NavState, OpenTabs, PanelVis, RemoteTerminal, WindowSize, commands,
-    complete_cd_path, complete_command_path, page_count, save_data,
+    complete_cd_path, complete_clone_url, complete_command_path, page_count, save_data,
     state::{HistoryItem, RecentDir},
 };
 
@@ -48,11 +48,13 @@ use crate::key_handling::ArrowHandler;
 type SharedPrinter = Arc<Mutex<Box<dyn ExternalPrinter + Send>>>;
 
 /// Rustyline `Helper` that provides Tab-completion for the `cd` builtin
-/// through the shared bookmark + filesystem completer. Other commands fall
-/// back to rustyline's built-in filename completer.
+/// through the shared bookmark + filesystem completer, and for `clone`'s repo
+/// URL from the saved clone roots. Other commands fall back to rustyline's
+/// built-in filename completer.
 struct ShellHelper {
     bookmarks: Arc<Mutex<Vec<PathBuf>>>,
     recent_dirs: Arc<Mutex<Vec<RecentDir>>>,
+    clone_roots: Arc<Mutex<Vec<String>>>,
     home: Option<PathBuf>,
     /// Rustyline's built-in filename completer, used as the fallback when no
     /// bookmark matches (and for non-`cd` commands).
@@ -96,6 +98,7 @@ const BUILTINS: &[&str] = &[
     "branch",
     "commit",
     "checkout",
+    "clone",
     "run",
     "build",
     "fmt",
@@ -281,6 +284,23 @@ impl Completer for ShellHelper {
         drop(bookmarks);
         drop(recent_dirs);
 
+        // `clone shel` -> `clone https://github.com/<user>/shel`, from the
+        // roots of earlier full-URL clones.
+        if let Ok(roots) = self.clone_roots.lock()
+            && let Some(result) = complete_clone_url(line, pos, &roots)
+            && !result.candidates.is_empty()
+        {
+            let pairs = result
+                .candidates
+                .into_iter()
+                .map(|candidate| Pair {
+                    display: candidate.display,
+                    replacement: candidate.replacement,
+                })
+                .collect();
+            return Ok((result.start, pairs));
+        }
+
         // Explicit paths (`./script.sh`, `../bin/foo`, `~/...`) complete against
         // files as well as directories, so `./install_` + Tab fills in the
         // script name. rustyline's filename completer doesn't handle these as
@@ -366,11 +386,12 @@ impl Helper for ShellHelper {}
 struct BookmarkHandler {
     bookmarks: Arc<Mutex<Vec<PathBuf>>>,
     /// Held so we can write the full state file (bookmarks + recent dirs +
-    /// history + remote terminals) in a single pass when a bookmark is
-    /// added.
+    /// history + remote terminals + clone roots) in a single pass when a
+    /// bookmark is added.
     recent_dirs: Arc<Mutex<Vec<RecentDir>>>,
     history: Arc<Mutex<Vec<HistoryItem>>>,
     remote_terminals: Arc<Mutex<Vec<RemoteTerminal>>>,
+    clone_roots: Arc<Mutex<Vec<String>>>,
     /// Snapshot of `panel_vis` taken at handler construction. The CLI
     /// never mutates this field, so the snapshot is always current and
     /// we just write it back unchanged to preserve GUI settings.
@@ -411,17 +432,19 @@ impl ConditionalEventHandler for BookmarkHandler {
                 let msg = format!("Added a bookmark: {}\n", cwd.display());
                 list.push(cwd);
                 added = true;
-                // Lock recent_dirs, history, remote_terminals after
-                // bookmarks — same order as State::save, so no
+                // Lock recent_dirs, history, remote_terminals, clone_roots
+                // after bookmarks — same order as State::save, so no
                 // lock-order conflicts.
                 if let Ok(recent) = self.recent_dirs.lock()
                     && let Ok(history) = self.history.lock()
                     && let Ok(remote_terminals) = self.remote_terminals.lock()
+                    && let Ok(clone_roots) = self.clone_roots.lock()
                     && let Err(e) = save_data::save_state(
                         &list,
                         &recent,
                         &history,
                         &remote_terminals,
+                        &clone_roots,
                         &self.panel_vis,
                         self.window_size,
                         &self.open_tabs,
@@ -634,6 +657,7 @@ fn main() {
     rl.set_helper(Some(ShellHelper {
         bookmarks: state.dir_bookmarks.clone(),
         recent_dirs: state.recent_dirs.clone(),
+        clone_roots: state.clone_roots.clone(),
         home: home.clone(),
         fs_completer: FilenameCompleter::new(),
         hinter: HistoryHinter::new(),
@@ -674,6 +698,7 @@ fn main() {
             recent_dirs: state.recent_dirs.clone(),
             history: state.history.clone(),
             remote_terminals: state.remote_terminals.clone(),
+            clone_roots: state.clone_roots.clone(),
             nav: hist_nav.clone(),
             panel_vis: state.panel_vis,
             window_size: state.window_size,

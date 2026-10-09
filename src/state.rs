@@ -32,6 +32,10 @@ pub struct State {
     /// Paths we've execute commands from. Works in a similar way to bookmarks.
     pub recent_dirs: Arc<Mutex<Vec<RecentDir>>>,
     pub remote_terminals: Arc<Mutex<Vec<RemoteTerminal>>>,
+    /// Roots of repos cloned by full URL, e.g. `https://github.com/david-oconnor`,
+    /// oldest first. `clone <name>` expands to `git clone <newest root>/<name>`;
+    /// see [crate::git::expand_clone]. Shared with the Tab completer.
+    pub clone_roots: Arc<Mutex<Vec<String>>>,
     /// In the current dir. Note persistent, unlike some of our other lists.
     /// Currently unused in this application; TBD. (The GUI keeps its own copy
     /// on its own `State`.) Only `refresh_browser_files` writes it, so it's
@@ -79,6 +83,7 @@ impl Default for State {
             dir_bookmarks: Arc::new(Mutex::new(Vec::new())),
             recent_dirs: Arc::new(Mutex::new(Vec::new())),
             remote_terminals: Arc::new(Mutex::new(Vec::new())),
+            clone_roots: Arc::new(Mutex::new(Vec::new())),
             browser_files: Arc::new(Mutex::new(Vec::new())),
             panel_vis: PanelVis::default(),
             window_size: None,
@@ -157,10 +162,10 @@ impl State {
     }
 
     /// Persist user-controlled state (bookmarks + recent dirs + history +
-    /// remote terminals) to the given file. Called after every mutation of
-    /// any of them. Locks in the order bookmarks → recent_dirs → history →
-    /// remote_terminals — keep this order consistent across all callers to
-    /// avoid lock-order deadlocks. Only `commands::run_command` calls this
+    /// remote terminals + clone roots) to the given file. Called after every
+    /// mutation of any of them. Locks in the order bookmarks → recent_dirs →
+    /// history → remote_terminals → clone_roots — keep this order consistent
+    /// across all callers to avoid lock-order deadlocks. Only `commands::run_command` calls this
     /// (the binary persists via `save_data::save_state` directly), so it's
     /// crate-private.
     pub(crate) fn save(&self, path: &Path) -> io::Result<()> {
@@ -184,11 +189,17 @@ impl State {
             .lock()
             .map_err(|_| io::Error::other("remote-terminals lock poisoned"))?;
 
+        let clone_roots = self
+            .clone_roots
+            .lock()
+            .map_err(|_| io::Error::other("clone-roots lock poisoned"))?;
+
         save_data::save_state(
             &bookmarks,
             &recent,
             &history,
             &remote_terminals,
+            &clone_roots,
             &self.panel_vis,
             self.window_size,
             &self.open_tabs,
@@ -212,6 +223,7 @@ impl State {
             dir_bookmarks: Arc::new(Mutex::new(loaded.bookmarks)),
             recent_dirs: Arc::new(Mutex::new(loaded.recent_dirs)),
             remote_terminals: Arc::new(Mutex::new(loaded.remote_terminals)),
+            clone_roots: Arc::new(Mutex::new(loaded.clone_roots)),
             browser_files: Arc::new(Mutex::new(Vec::new())),
             panel_vis: loaded.panel_vis,
             window_size: loaded.window_size,
@@ -523,6 +535,16 @@ pub fn record_recent_dir(recent: &Arc<Mutex<Vec<RecentDir>>>, cwd: &Path) {
             path: cwd.to_path_buf(),
             dt: Utc::now(),
         });
+    }
+}
+
+/// Record `root` (see [crate::git::clone_root]) as the newest clone root. An
+/// existing copy is removed first, so the list stays deduped with the most
+/// recently used root last; that's the one bare-name clones expand with.
+pub fn record_clone_root(roots: &Arc<Mutex<Vec<String>>>, root: &str) {
+    if let Ok(mut list) = roots.lock() {
+        list.retain(|r| r != root);
+        list.push(root.to_string());
     }
 }
 

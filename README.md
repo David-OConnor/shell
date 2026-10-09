@@ -55,7 +55,9 @@ somewhere convenient, and add it to the system path; then you can launch by typi
 - `ssh 2` Go to #2 on the remotes list
 - `cd cod` + Tab: Go to a bookmark or recent directory that contains these letters, e.g ~/code
 
-- `pull`, `push`, `branch`, `commit`, `checkout`: Shorthand for `git pull`, `git push`, etc.
+- `pull`, `push`, `branch`, `commit`, `checkout`, `clone`: Shorthand for `git pull`, `git push`, etc.
+- `clone <name>`: After one clone by full URL, e.g. `clone https://github.com/david-oconnor/shell`, clone
+  other repos from the same place by name: `clone lin_alg`.
 - `run`, `build`, `fmt`: Shorthand for `cargo run`, `cargo build`, `cargo +nightly fmt`. `run release` runs `cargo run --release`.
 - `rm_targets`: Find cargo `target` folders under the current directory, and delete them after confirming.
 - `open`: Open the current directory in the OS file browser.
@@ -83,7 +85,7 @@ As you type, Shell shows a dimmed (grey) suggestion after the cursor: the most r
 
 
 ### Tab completion
-Tab completes the `cd` argument against your bookmarks first, then directories on disk (including nested paths like `code/Bi`), then recent directories, then directories nested anywhere under a bookmark (up to 4 levels deep). For example, with `~/code/Bio` bookmarked, `cd plasc` + Tab completes to `~/code/Bio/plascad` from any directory. Other commands fall back to filename completion in the current directory.
+Tab completes the `cd` argument against your bookmarks first, then directories on disk (including nested paths like `code/Bi`), then recent directories, then directories nested anywhere under a bookmark (up to 4 levels deep). For example, with `~/code/Bio` bookmarked, `cd plasc` + Tab completes to `~/code/Bio/plascad` from any directory. After `clone`, Tab completes a repo name to its full URL; see [Cloning from common roots](#cloning-from-common-roots). Other commands fall back to filename completion in the current directory.
 
 
 ## Syntax highlighting
@@ -106,8 +108,8 @@ sync A commit message
 
 Warning: This isn't suitable for all workflows. If you use git in a way where it isn't appropriate to sync all gitignored files, this may have unintended consequences!
 
-`pull`, `push`, `branch`, `commit`, and `checkout` are shorthand for the `git` command of the same name. Any arguments
-are passed through unchanged:
+`pull`, `push`, `branch`, `commit`, `checkout`, and `clone` are shorthand for the `git` command of the same name. Any
+arguments are passed through unchanged:
 
 ```shell
 pull                     // git pull
@@ -115,6 +117,30 @@ push origin main         // git push origin main
 branch -a                // git branch -a
 commit -m "A message"    // git commit -m "A message"
 ```
+
+### Cloning from common roots
+When you clone a repo by its full URL, Shell saves the URL's root: everything before the repo name. After that,
+`clone` (or `git clone`) followed by just a repo name clones it from that root:
+
+```shell
+clone https://github.com/david-oconnor/shell    // Clones, and saves https://github.com/david-oconnor
+clone lin_alg                                   // git clone https://github.com/david-oconnor/lin_alg
+git clone -b main graphics                      // git clone -b main https://github.com/david-oconnor/graphics
+```
+
+The full command is printed before it runs, so you can see which URL was used. SSH addresses work the same way:
+cloning `git@github.com:david-oconnor/shell.git` saves `git@github.com:david-oconnor`.
+
+- A root is saved only when the clone succeeds, so a mistyped URL isn't remembered.
+- Several roots can be saved; a bare name uses the one you cloned from most recently. Cloning from a full URL again
+  makes its root the most recent.
+- Tab completes the repo name: `clone lin` + Tab gives `clone https://github.com/david-oconnor/lin`. With nothing
+  typed after `clone`, or the start of a URL, Tab lists your saved roots instead, so you can pick a different one.
+- Only bare names are expanded. URLs, paths like `../repo`, and names that match a directory in the current folder
+  (a local repo you're cloning) run unchanged.
+- URLs containing a password, e.g. `https://user:token@github.com/...`, are never saved.
+
+Roots are saved in the [application state file](#application-state), alongside your bookmarks.
 
 Likewise, `run`, `build`, and `fmt` are shorthand for `cargo run`, `cargo build`, and `cargo +nightly fmt`. Arguments
 are passed through, except that a leading `release` becomes `--release`:
@@ -168,7 +194,8 @@ Run `logs <service>`, to view the recent Journalctl logs. Linux only. For exampl
 - `shelp`: List every command and key shortcut, one per line.
 - `exit` or `quit`: Exit the program.
 - `sync`: Run `git add .`, `git commit -am <the commit message>`, and `git push`.
-- `pull`, `push`, `branch`, `commit`, and `checkout`: Aliases for `git pull`, `git push`, `git branch`, and `git commit`.
+- `pull`, `push`, `branch`, `commit`, `checkout`, and `clone`: Aliases for `git pull`, `git push`, etc.
+- `clone <name>`: Clone a repo by name, from the root of the last repo you cloned by full URL.
 - `run`, `build`, and `fmt`: Aliases for `cargo run`, `cargo build`, and `cargo +nightly fmt`. `run release` runs `cargo run --release`.
 - `rm_targets`: Find cargo `target` folders under the current directory, list them with their sizes in GB, show the total that would be freed, and delete them after you confirm.
 - `open`: Open the current directory in the OS file browser: Explorer on Windows, or the default file manager (e.g. Nautilus on Gnome) via `xdg-open` on Linux.
@@ -260,5 +287,5 @@ Standard line-editing shortcuts, provided by the underlying line editor:
 
 
 ## Application state
-Application state, including folder bookmarks, is saved in a file called `shell_state.ss`, in the user's
+Application state, including folder bookmarks and git clone roots, is saved in a file called `shell_state.ss`, in the user's
 home directory. It is text-based file format with backwards compatibility support.
