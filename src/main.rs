@@ -100,6 +100,7 @@ const BUILTINS: &[&str] = &[
     "build",
     "fmt",
     "rm_targets",
+    "open",
     "logs",
     "ssh",
     "remote",

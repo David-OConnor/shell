@@ -58,6 +58,7 @@ somewhere convenient, and add it to the system path; then you can launch by typi
 - `pull`, `push`, `branch`, `commit`, `checkout`: Shorthand for `git pull`, `git push`, etc.
 - `run`, `build`, `fmt`: Shorthand for `cargo run`, `cargo build`, `cargo +nightly fmt`. `run release` runs `cargo run --release`.
 - `rm_targets`: Find cargo `target` folders under the current directory, and delete them after confirming.
+- `open`: Open the current directory in the OS file browser.
 
 - Use the arrow keys to navigate to recent items
 - Press Tab to autocomplete
@@ -170,6 +171,7 @@ Run `logs <service>`, to view the recent Journalctl logs. Linux only. For exampl
 - `pull`, `push`, `branch`, `commit`, and `checkout`: Aliases for `git pull`, `git push`, `git branch`, and `git commit`.
 - `run`, `build`, and `fmt`: Aliases for `cargo run`, `cargo build`, and `cargo +nightly fmt`. `run release` runs `cargo run --release`.
 - `rm_targets`: Find cargo `target` folders under the current directory, list them with their sizes in GB, show the total that would be freed, and delete them after you confirm.
+- `open`: Open the current directory in the OS file browser: Explorer on Windows, or the default file manager (e.g. Nautilus on Gnome) via `xdg-open` on Linux.
 - `logs`: Runs journalctl -u -f with the service.
 - `del bm <number>`: Delete a bookmark by number. 
 - `his <number>`: Execute a command from history.

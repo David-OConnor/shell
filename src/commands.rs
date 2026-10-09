@@ -20,7 +20,7 @@ use std::{
     io,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 use crate::{
@@ -204,6 +204,33 @@ fn cat(path: &Path) {
                 return;
             }
         }
+    }
+}
+
+/// Implements `open`: show `dir` in the OS file browser (Explorer on Windows,
+/// the default file manager via `xdg-open` on Linux, Finder on macOS). The
+/// browser runs independently of the shell, so we don't wait for it; a
+/// background thread reaps the launcher so it doesn't linger as a zombie.
+/// Explorer exits with 1 even on success, so its status isn't checked.
+fn open_dir(dir: &Path) {
+    let launcher = if cfg!(windows) {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+
+    match Command::new(launcher)
+        .arg(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .spawn()
+    {
+        Ok(mut child) => {
+            std::thread::spawn(move || child.wait());
+        }
+        Err(e) => eprintln!("open: failed to run {launcher}: {e}"),
     }
 }
 
@@ -413,6 +440,11 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
                 eprintln!("rm_targets: only runs locally; disconnect first");
                 return true;
             }
+            // Opens a local window; there's no remote equivalent.
+            "open" => {
+                eprintln!("open: only runs locally; disconnect first");
+                return true;
+            }
             _ => Some(input.to_string()),
         };
 
@@ -466,6 +498,8 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
         }
 
         "rm_targets" => crate::cargo_targets::rm_targets(&state.cwd),
+
+        "open" => open_dir(&state.cwd),
 
         // On linux, this is likely the same as the system `cat` command, but it works on Windows.
         // Another approach may be to only apply this branch on Windows.
@@ -821,6 +855,10 @@ pub fn shelp_text(frontend: Frontend) -> String {
         ));
     }
     commands.extend_from_slice(&[
+        (
+            "open",
+            "Open the current directory in the OS file browser",
+        ),
         (
             "logs <service>",
             "Show a systemd service's journalctl logs. Linux only",
