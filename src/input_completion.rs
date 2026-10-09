@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{RecentDir, util};
+use crate::{RecentDir, git, util};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompletionResult {
@@ -367,6 +367,120 @@ pub fn complete_command_path(
         start: word_start,
         candidates: complete_paths(word, cwd, home, false),
     })
+}
+
+/// Complete the repository argument of `git clone` / `clone` from the saved
+/// clone roots (oldest first; see [crate::state::State::clone_roots]). A bare repo
+/// name completes to the newest root, e.g. `clone shell` →
+/// `clone https://github.com/david-oconnor/shell`. An empty argument, or the
+/// start of a root, completes to the matching roots with a trailing `/`,
+/// newest first, so a different root can be picked before typing the name.
+/// Returns `None` when the word under the cursor isn't the repository.
+pub fn complete_clone_url(line: &str, pos: usize, roots: &[String]) -> Option<CompletionResult> {
+    if roots.is_empty() || pos > line.len() || !line.is_char_boundary(pos) {
+        return None;
+    }
+
+    let before = &line[..pos];
+    // The word the cursor sits at the end of; empty right after a space.
+    let word_start = before
+        .trim_end_matches(|c: char| !c.is_whitespace())
+        .len();
+    let word = &before[word_start..];
+    let prior: Vec<&str> = before[..word_start].split_whitespace().collect();
+    if word.starts_with('-') || git::clone_repo_index(&prior) != Some(prior.len()) {
+        return None;
+    }
+
+    let typed = word.to_lowercase();
+    let mut candidates: Vec<CompletionCandidate> = roots
+        .iter()
+        .rev()
+        .filter(|root| root.to_lowercase().starts_with(&typed))
+        .map(|root| format!("{root}/"))
+        .map(|url| CompletionCandidate {
+            display: url.clone(),
+            replacement: url,
+        })
+        .collect();
+    if candidates.is_empty()
+        && git::is_bare_repo_name(word)
+        && let Some(newest) = roots.last()
+    {
+        let url = format!("{newest}/{word}");
+        candidates.push(CompletionCandidate {
+            display: url.clone(),
+            replacement: url,
+        });
+    }
+
+    Some(CompletionResult {
+        start: word_start,
+        candidates,
+    })
+}
+
+#[cfg(test)]
+mod clone_completion_tests {
+    use super::*;
+
+    fn roots() -> Vec<String> {
+        vec![
+            "git@github.com:rust-lang".to_string(),
+            "https://github.com/david-oconnor".to_string(),
+        ]
+    }
+
+    fn replacements(line: &str) -> Option<Vec<String>> {
+        let result = complete_clone_url(line, line.len(), &roots())?;
+        Some(
+            result
+                .candidates
+                .into_iter()
+                .map(|c| c.replacement)
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn bare_name_completes_to_newest_root() {
+        let line = "clone shel";
+        let result = complete_clone_url(line, line.len(), &roots()).unwrap();
+        assert_eq!(result.start, 6);
+        assert_eq!(
+            apply_completion(line, line.len(), &result).as_deref(),
+            Some("clone https://github.com/david-oconnor/shel")
+        );
+        assert_eq!(
+            replacements("git clone -b main shel"),
+            Some(vec!["https://github.com/david-oconnor/shel".to_string()])
+        );
+    }
+
+    #[test]
+    fn empty_or_partial_url_lists_roots() {
+        assert_eq!(
+            replacements("clone "),
+            Some(vec![
+                "https://github.com/david-oconnor/".to_string(),
+                "git@github.com:rust-lang/".to_string(),
+            ])
+        );
+        assert_eq!(
+            replacements("git clone git@"),
+            Some(vec!["git@github.com:rust-lang/".to_string()])
+        );
+    }
+
+    #[test]
+    fn ignores_other_words() {
+        assert_eq!(replacements("clone"), None);
+        assert_eq!(replacements("clone -b "), None);
+        assert_eq!(replacements("clone --dep"), None);
+        assert_eq!(replacements("git status "), None);
+        assert_eq!(replacements("clone shell my_di"), None);
+        assert_eq!(complete_clone_url("clone shel", 10, &[]), None);
+    }
 }
 
 /// True when `word` is written as an explicit filesystem path rather than a

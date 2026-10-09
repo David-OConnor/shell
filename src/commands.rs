@@ -24,7 +24,8 @@ use std::{
 };
 
 use crate::{
-    find_bookmark, find_history_index, find_recent_dir, path_from_args, quiet_command, ssh,
+    clone_root, expand_clone, find_bookmark, find_history_index, find_recent_dir, path_from_args,
+    quiet_command, record_clone_root, ssh,
     state::State,
 };
 
@@ -209,7 +210,7 @@ fn cat(path: &Path) {
 
 /// Bare commands that are shorthand for the `git` subcommand of the same name,
 /// e.g. `pull` runs `git pull`.
-pub const GIT_ALIASES: &[&str] = &["pull", "push", "branch", "commit", "checkout"];
+pub const GIT_ALIASES: &[&str] = &["pull", "push", "branch", "commit", "checkout", "clone"];
 
 /// Bare commands that are shorthand for a `cargo` command line, e.g. `run`
 /// runs `cargo run`.
@@ -361,6 +362,21 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
     // receives the full command.
     let expanded = expand_alias(cmd, args);
     let input = expanded.as_deref().unwrap_or(input);
+
+    // `git clone <name>` -> `git clone <root>/<name>`, using the newest root
+    // saved from an earlier full-URL clone. Echoed, since the URL that runs
+    // isn't what was typed. A remote has no local directory to check for a
+    // same-named repo, hence no cwd there.
+    let local_cwd = state.active_remote.is_none().then_some(state.cwd.as_path());
+    let clone_expanded = state
+        .clone_roots
+        .lock()
+        .ok()
+        .and_then(|roots| expand_clone(input, roots.last()?, local_cwd));
+    if let Some(line) = &clone_expanded {
+        println!("> {line}");
+    }
+    let input = clone_expanded.as_deref().unwrap_or(input);
 
     // While an SSH session is live, typed commands run on the remote rather
     // than locally. Only the session-management keywords are intercepted here;
@@ -610,22 +626,38 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
         // environment, run that venv's interpreter instead of whatever `python`
         // resolves to on PATH. Falls through to the normal passthrough when
         // there's no venv, so the system python still works as before.
-        "python" | "python3" => match crate::python::venv_python(&state.cwd) {
-            Some(interpreter) => run_passthrough(&rewrite_venv_command(&interpreter, args)),
-            None => run_passthrough(input),
-        },
+        "python" | "python3" => {
+            match crate::python::venv_python(&state.cwd) {
+                Some(interpreter) => run_passthrough(&rewrite_venv_command(&interpreter, args)),
+                None => run_passthrough(input),
+            };
+        }
 
         // `pip` (or `pip3`): same idea as `python` above — when the cwd holds a
         // venv, run that venv's `pip` so installs land in the environment rather
         // than the system site-packages. Falls through otherwise.
-        "pip" | "pip3" => match crate::python::venv_pip(&state.cwd) {
-            Some(pip) => run_passthrough(&rewrite_venv_command(&pip, args)),
-            None => run_passthrough(input),
-        },
+        "pip" | "pip3" => {
+            match crate::python::venv_pip(&state.cwd) {
+                Some(pip) => run_passthrough(&rewrite_venv_command(&pip, args)),
+                None => run_passthrough(input),
+            };
+        }
 
         // Everything else: Pass through to the system shell (e.g. the one which we launched this
         // application from)
-        _ => run_passthrough(input),
+        _ => {
+            // A successful clone from a full URL saves the URL's root, so later
+            // clones from the same place need only the repo name. Only on
+            // success, so a mistyped URL isn't saved.
+            if run_passthrough(input)
+                && let Some(root) = clone_root(input)
+            {
+                record_clone_root(&state.clone_roots, &root);
+                if let Err(e) = state.save(state_path) {
+                    eprintln!("warning: failed to save state: {e}");
+                }
+            }
+        }
     }
 
     true
@@ -684,12 +716,13 @@ pub fn install_ctrl_c_shield() {
 
 /// Run a command line through the system shell (PowerShell 7+ on Windows, `sh`
 /// elsewhere), inheriting stdio so interactive programs work. Used for the
-/// catch-all passthrough and the venv-rewritten `python` invocation.
+/// catch-all passthrough and the venv-rewritten `python` invocation. Returns
+/// whether the command ran and exited successfully.
 ///
 /// `-NoProfile`/`-NoLogo` skip loading the user's `$PROFILE` and the startup
 /// banner, which together dominate pwsh's cold-start time. Each command spawns a
 /// fresh process, so this shaves ~200ms off every passthrough command.
-fn run_passthrough(line: &str) {
+fn run_passthrough(line: &str) -> bool {
     let result = if cfg!(windows) {
         Command::new("pwsh")
             .args(["-NoProfile", "-NoLogo", "-Command", line])
@@ -698,8 +731,12 @@ fn run_passthrough(line: &str) {
         Command::new("sh").args(["-c", line]).status()
     };
 
-    if let Err(e) = result {
-        eprintln!("shell: {e}");
+    match result {
+        Ok(status) => status.success(),
+        Err(e) => {
+            eprintln!("shell: {e}");
+            false
+        }
     }
 }
 
@@ -805,8 +842,12 @@ pub fn shelp_text(frontend: Frontend) -> String {
             "`git add .`, then `git commit -am <message>`, then `git push`",
         ),
         (
-            "pull, push, branch, commit, checkout",
+            "pull, push, branch, commit, checkout, clone",
             "Shorthand for `git pull`, `git push`, etc. Arguments are passed through",
+        ),
+        (
+            "clone <name>",
+            "Clone <root>/<name>, where <root> is saved from your last clone by full URL",
         ),
         (
             "run, build, fmt",
@@ -870,7 +911,7 @@ pub fn shelp_text(frontend: Frontend) -> String {
             ("Enter", "Run the input"),
             (
                 "Tab",
-                "Autocomplete: bookmarks, directories, and dirs under bookmarks after `cd`, filenames otherwise",
+                "Autocomplete: bookmarks, directories, and dirs under bookmarks after `cd`; repo URLs after `clone`; filenames otherwise",
             ),
             (
                 "Up / Down",
@@ -929,6 +970,10 @@ mod tests {
         assert_eq!(
             expand_alias("push", "origin main").as_deref(),
             Some("git push origin main")
+        );
+        assert_eq!(
+            expand_alias("clone", "shell").as_deref(),
+            Some("git clone shell")
         );
         assert_eq!(expand_alias("run", "").as_deref(), Some("cargo run"));
         assert_eq!(

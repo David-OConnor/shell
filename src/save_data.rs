@@ -1,7 +1,7 @@
 //! Persistent application state. Includes the bookmark list,
-//! the recent-directories list, command history, and saved remote
-//! terminals. A simple text format; easy to add new functionality without
-//! breaking existing files.
+//! the recent-directories list, command history, saved remote
+//! terminals, and git clone roots. A simple text format; easy to add new
+//! functionality without breaking existing files.
 //!
 //! HIS and REMOTE_TERMINAL use TAB as a field separator (rather than
 //! space like REC_DIR) because the trailing fields can contain spaces.
@@ -37,6 +37,7 @@ const WINDOW_SIZE_TAG: &str = "WINDOW_SIZE ";
 const OPEN_TAB_TAG: &str = "OPEN_TAB ";
 const ACTIVE_TAB_TAG: &str = "ACTIVE_TAB ";
 const FONT_SIZE_TAG: &str = "FONT_SIZE ";
+const CLONE_ROOT_TAG: &str = "CLONE_ROOT ";
 
 /// Bundle of everything `load_state` returns. Lets callers destructure
 /// in one step and lets us grow the format without churning every call
@@ -46,6 +47,10 @@ pub struct LoadedState {
     pub recent_dirs: Vec<RecentDir>,
     pub history: Vec<HistoryItem>,
     pub remote_terminals: Vec<RemoteTerminal>,
+    /// Roots of repos cloned by full URL, oldest first; see [State::clone_roots].
+    ///
+    /// [State::clone_roots]: crate::state::State::clone_roots
+    pub clone_roots: Vec<String>,
     pub panel_vis: PanelVis,
     /// `None` when the file has no `WINDOW_SIZE` line (e.g. it predates the
     /// feature, or was last written by a CLI-only session that never had a
@@ -70,12 +75,13 @@ pub fn default_path() -> Option<PathBuf> {
 }
 
 /// Overwrite the state file with the given bookmark, recent-dir, history,
-/// and remote-terminal lists. Creates parent directories as needed.
+/// remote-terminal, and clone-root lists. Creates parent directories as needed.
 pub fn save_state(
     bookmarks: &[PathBuf],
     recent_dirs: &[RecentDir],
     history: &[HistoryItem],
     remote_terminals: &[RemoteTerminal],
+    clone_roots: &[String],
     panel_vis: &PanelVis,
     window_size: Option<WindowSize>,
     open_tabs: &OpenTabs,
@@ -165,6 +171,10 @@ pub fn save_state(
         )?;
     }
 
+    for root in clone_roots {
+        writeln!(f, "{CLONE_ROOT_TAG}{}", sanitize_field(root))?;
+    }
+
     Ok(())
 }
 
@@ -188,6 +198,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
                 recent_dirs: Vec::new(),
                 history: Vec::new(),
                 remote_terminals: Vec::new(),
+                clone_roots: Vec::new(),
                 panel_vis: PanelVis::default(),
                 window_size: None,
                 open_tabs: OpenTabs::default(),
@@ -201,6 +212,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
     let mut recent_dirs = Vec::new();
     let mut history = Vec::new();
     let mut remote_terminals = Vec::new();
+    let mut clone_roots = Vec::new();
     let mut panel_vis = PanelVis::default();
     let mut window_size = None;
     let mut open_tabs = OpenTabs::default();
@@ -348,6 +360,13 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
             }
             continue;
         }
+        if let Some(rest) = trimmed.strip_prefix(CLONE_ROOT_TAG) {
+            let root = rest.trim_end();
+            if !root.is_empty() {
+                clone_roots.push(root.to_string());
+            }
+            continue;
+        }
         // Unknown tags are ignored on purpose for forward compatibility.
     }
     crate::state::dedup_history(&mut history);
@@ -357,9 +376,40 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
         recent_dirs,
         history,
         remote_terminals,
+        clone_roots,
         panel_vis,
         window_size,
         open_tabs,
         font_size,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clone_roots_round_trip() {
+        let path = std::env::temp_dir().join("shell_save_data_test_clone_roots.ss");
+        let roots = vec![
+            "https://github.com/david-oconnor".to_string(),
+            "git@github.com:rust-lang".to_string(),
+        ];
+        save_state(
+            &[],
+            &[],
+            &[],
+            &[],
+            &roots,
+            &PanelVis::default(),
+            None,
+            &OpenTabs::default(),
+            None,
+            &path,
+        )
+        .unwrap();
+        let loaded = load_state(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        assert_eq!(loaded.clone_roots, roots);
+    }
 }
