@@ -315,21 +315,7 @@ fn visit_key(p: &Path) -> String {
 /// Dot-directories everywhere, plus directories with the Hidden attribute on
 /// Windows (e.g. `AppData`).
 pub(crate) fn is_hidden(entry: &fs::DirEntry) -> bool {
-    if entry.file_name().to_string_lossy().starts_with('.') {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
-        if entry
-            .metadata()
-            .is_ok_and(|m| m.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0)
-        {
-            return true;
-        }
-    }
-    false
+    entry.file_name().to_string_lossy().starts_with('.') || util::has_hidden_attr(entry)
 }
 
 /// Complete a command (or argument) written as an explicit path — one starting

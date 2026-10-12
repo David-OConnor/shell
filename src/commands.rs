@@ -20,7 +20,7 @@ use std::{
     io,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Command, ExitStatus, Stdio},
 };
 
 use crate::{
@@ -36,6 +36,21 @@ use crate::{
 pub enum OutKind {
     Stdout,
     Stderr,
+    /// Stderr from a child process that exited successfully: warnings and
+    /// progress chatter (e.g. git's CRLF warnings and push summary), not an
+    /// error. Printed to stderr like [OutKind::Stderr], but the GUI colours it
+    /// amber rather than red.
+    StderrOk,
+}
+
+/// The kind for a finished child's captured stderr: [OutKind::Stderr] if it
+/// failed, [OutKind::StderrOk] if it succeeded.
+pub fn stderr_kind(status: ExitStatus) -> OutKind {
+    if status.success() {
+        OutKind::StderrOk
+    } else {
+        OutKind::Stderr
+    }
 }
 
 /// Callback used by the shared built-ins to emit output. The first arg is
@@ -73,7 +88,7 @@ pub fn sync(message: &str, cwd: &Path, sink: OutputSink) {
                 }
                 if !out.stderr.is_empty() {
                     sink(
-                        OutKind::Stderr,
+                        stderr_kind(out.status),
                         String::from_utf8_lossy(&out.stderr).into_owned(),
                     );
                 }
@@ -150,7 +165,7 @@ pub fn logs(service: &str, follow: bool, sink: OutputSink) {
                 }
                 if !out.stderr.is_empty() {
                     sink(
-                        OutKind::Stderr,
+                        stderr_kind(out.status),
                         String::from_utf8_lossy(&out.stderr).into_owned(),
                     );
                 }
@@ -469,7 +484,7 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
             let msg = msg.trim_end_matches('\n');
             match kind {
                 OutKind::Stdout => println!("{msg}"),
-                OutKind::Stderr => eprintln!("{msg}"),
+                OutKind::Stderr | OutKind::StderrOk => eprintln!("{msg}"),
             }
         };
 
@@ -549,7 +564,7 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
                 let msg = msg.trim_end_matches('\n');
                 match kind {
                     OutKind::Stdout => println!("{msg}"),
-                    OutKind::Stderr => eprintln!("{msg}"),
+                    OutKind::Stderr | OutKind::StderrOk => eprintln!("{msg}"),
                 }
             };
             sync(args, &cwd, &mut sink);
@@ -563,7 +578,7 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
                 let msg = msg.trim_end_matches('\n');
                 match kind {
                     OutKind::Stdout => println!("{msg}"),
-                    OutKind::Stderr => eprintln!("{msg}"),
+                    OutKind::Stderr | OutKind::StderrOk => eprintln!("{msg}"),
                 }
             };
             logs(args, true, &mut sink);

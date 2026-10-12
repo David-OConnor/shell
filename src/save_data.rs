@@ -24,7 +24,9 @@ use std::{
 
 use chrono::{DateTime, SecondsFormat, Utc};
 
-use crate::state::{FontSizes, HistoryItem, OpenTabs, PanelVis, RecentDir, RemoteTerminal, WindowSize};
+use crate::state::{
+    DirLabelLens, FontSizes, HistoryItem, OpenTabs, PanelVis, RecentDir, RemoteTerminal, WindowSize,
+};
 
 pub const FILENAME: &str = "shell_state.ss";
 
@@ -37,6 +39,7 @@ const WINDOW_SIZE_TAG: &str = "WINDOW_SIZE ";
 const OPEN_TAB_TAG: &str = "OPEN_TAB ";
 const ACTIVE_TAB_TAG: &str = "ACTIVE_TAB ";
 const FONT_SIZE_TAG: &str = "FONT_SIZE ";
+const DIR_LABEL_LEN_TAG: &str = "DIR_LABEL_LEN ";
 const CLONE_ROOT_TAG: &str = "CLONE_ROOT ";
 
 /// Bundle of everything `load_state` returns. Lets callers destructure
@@ -64,6 +67,9 @@ pub struct LoadedState {
     /// lacks it (or there's no such line: it predates the feature, or a
     /// CLI-only save), in which case the GUI falls back to its default size.
     pub font_size: FontSizes,
+    /// GUI Bookmarks / Recent dirs path lengths, in characters. Each is `None`
+    /// when the `DIR_LABEL_LEN` line lacks it, as with `font_size`.
+    pub dir_label_lens: DirLabelLens,
 }
 
 /// Where the state file lives by default: `<home>/shell_state.ss`. Falls back
@@ -86,6 +92,7 @@ pub fn save_state(
     window_size: Option<WindowSize>,
     open_tabs: &OpenTabs,
     font_size: FontSizes,
+    dir_label_lens: DirLabelLens,
     path: &Path,
 ) -> io::Result<()> {
     if let Some(parent) = path.parent()
@@ -168,6 +175,19 @@ pub fn save_state(
         writeln!(f, "{}", pairs.join(" "))?;
     }
 
+    // DirLabelLen: GUI-only, written only when present, like FONT_SIZE.
+    if dir_label_lens.bookmarks.is_some() || dir_label_lens.recent_dirs.is_some() {
+        write!(f, "{DIR_LABEL_LEN_TAG}")?;
+        let mut pairs = Vec::new();
+        if let Some(len) = dir_label_lens.bookmarks {
+            pairs.push(format!("bookmarks={len}"));
+        }
+        if let Some(len) = dir_label_lens.recent_dirs {
+            pairs.push(format!("recent_dirs={len}"));
+        }
+        writeln!(f, "{}", pairs.join(" "))?;
+    }
+
     for rt in remote_terminals {
         // Only non-secret connection details go on disk; the password lives in
         // the OS keyring (see `crate::secrets`). Format is host\tport\tusername.
@@ -212,6 +232,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
                 window_size: None,
                 open_tabs: OpenTabs::default(),
                 font_size: FontSizes::default(),
+                dir_label_lens: DirLabelLens::default(),
             });
         }
         Err(e) => return Err(e),
@@ -226,6 +247,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
     let mut window_size = None;
     let mut open_tabs = OpenTabs::default();
     let mut font_size = FontSizes::default();
+    let mut dir_label_lens = DirLabelLens::default();
 
     for line in BufReader::new(file).lines() {
         let line = line?;
@@ -357,6 +379,27 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
             }
             continue;
         }
+        if let Some(rest) = trimmed.strip_prefix(DIR_LABEL_LEN_TAG) {
+            // Parse `bookmarks=<chars> recent_dirs=<chars>`. A malformed or
+            // zero value leaves that length at `None` (the GUI's default).
+            for pair in rest.split_whitespace() {
+                let Some((k, v)) = pair.split_once('=') else {
+                    continue;
+                };
+                let Ok(len) = v.parse::<usize>() else {
+                    continue;
+                };
+                if len == 0 {
+                    continue;
+                }
+                match k {
+                    "bookmarks" => dir_label_lens.bookmarks = Some(len),
+                    "recent_dirs" => dir_label_lens.recent_dirs = Some(len),
+                    _ => {}
+                }
+            }
+            continue;
+        }
         if let Some(rest) = trimmed.strip_prefix(REMOTE_TERMINAL_TAG) {
             let rest = rest.trim_end_matches('\r');
 
@@ -394,6 +437,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
         window_size,
         open_tabs,
         font_size,
+        dir_label_lens,
     })
 }
 
@@ -418,6 +462,7 @@ mod tests {
             None,
             &OpenTabs::default(),
             FontSizes::default(),
+            DirLabelLens::default(),
             &path,
         )
         .unwrap();
@@ -450,10 +495,44 @@ mod tests {
                 None,
                 &OpenTabs::default(),
                 sizes,
+                DirLabelLens::default(),
                 &path,
             )
             .unwrap();
             assert_eq!(load_state(&path).unwrap().font_size, sizes);
+        }
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn dir_label_lens_round_trip() {
+        let path = std::env::temp_dir().join("shell_save_data_test_dir_label_lens.ss");
+        for lens in [
+            DirLabelLens::default(),
+            DirLabelLens {
+                bookmarks: Some(30),
+                recent_dirs: None,
+            },
+            DirLabelLens {
+                bookmarks: Some(30),
+                recent_dirs: Some(45),
+            },
+        ] {
+            save_state(
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &PanelVis::default(),
+                None,
+                &OpenTabs::default(),
+                FontSizes::default(),
+                lens,
+                &path,
+            )
+            .unwrap();
+            assert_eq!(load_state(&path).unwrap().dir_label_lens, lens);
         }
         let _ = fs::remove_file(&path);
     }

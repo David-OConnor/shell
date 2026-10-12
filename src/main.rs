@@ -20,8 +20,9 @@ use rustyline::{
     validate::Validator,
 };
 use shell::{
-    DISP_PAGE_LEN, FontSizes, NavState, OpenTabs, PanelVis, RemoteTerminal, WindowSize, commands,
-    complete_cd_path, complete_clone_url, complete_command_path, page_count, save_data,
+    DISP_PAGE_LEN, DirLabelLens, FontSizes, NavState, OpenTabs, PanelVis, RemoteTerminal,
+    WindowSize, commands, complete_cd_path, complete_clone_url, complete_command_path, page_count,
+    save_data,
     state::{HistoryItem, RecentDir},
 };
 
@@ -405,6 +406,9 @@ struct BookmarkHandler {
     /// Snapshot of the GUI font size, written back unchanged for the same
     /// reason as `panel_vis`.
     font_size: FontSizes,
+    /// Snapshot of the GUI's Bookmarks / Recent dirs path lengths, written
+    /// back unchanged for the same reason as `panel_vis`.
+    dir_label_lens: DirLabelLens,
     save_path: PathBuf,
     printer: SharedPrinter,
     /// Shared recall state. After adding a bookmark we stash the current input
@@ -449,6 +453,7 @@ impl ConditionalEventHandler for BookmarkHandler {
                         self.window_size,
                         &self.open_tabs,
                         self.font_size,
+                        self.dir_label_lens,
                         &self.save_path,
                     )
                 {
@@ -704,6 +709,7 @@ fn main() {
             window_size: state.window_size,
             open_tabs: state.open_tabs.clone(),
             font_size: state.font_size,
+            dir_label_lens: state.dir_label_lens,
             save_path: state_path.clone(),
             printer: printer.clone(),
         })),

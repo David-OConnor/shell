@@ -57,6 +57,9 @@ pub struct State {
     /// these — held only so a CLI-side save writes the GUI's values back
     /// unchanged instead of dropping the `FONT_SIZE` line.
     pub font_size: FontSizes,
+    /// GUI Bookmarks / Recent dirs path lengths. Held only to round-trip the
+    /// `DIR_LABEL_LEN` line, like `font_size`.
+    pub dir_label_lens: DirLabelLens,
     /// Cached git branch for `cwd`. `None` when cwd isn't inside a repo.
     /// Refreshed by `refresh_branch` after every command and after `cd` —
     /// branch can change behind our back via `git checkout`, so we re-check
@@ -89,6 +92,7 @@ impl Default for State {
             window_size: None,
             open_tabs: OpenTabs::default(),
             font_size: FontSizes::default(),
+            dir_label_lens: DirLabelLens::default(),
             branch,
             active_remote: None,
         }
@@ -204,6 +208,7 @@ impl State {
             self.window_size,
             &self.open_tabs,
             self.font_size,
+            self.dir_label_lens,
             path,
         )
     }
@@ -229,6 +234,7 @@ impl State {
             window_size: loaded.window_size,
             open_tabs: loaded.open_tabs,
             font_size: loaded.font_size,
+            dir_label_lens: loaded.dir_label_lens,
             branch,
             active_remote: None,
         })
@@ -256,6 +262,9 @@ pub struct BrowserFile {
     pub disp_name: String,
     pub is_folder: bool,
     pub is_executable: bool,
+    /// Has the Windows Hidden attribute. Always `false` on other platforms.
+    /// Independent of a leading `.` in the name, which is checked separately.
+    pub hidden_attr: bool,
 }
 
 /// A saved SSH remote. The password is *not* stored here — it lives in the OS
@@ -315,6 +324,17 @@ pub struct WindowSize {
 pub struct FontSizes {
     pub cli: Option<f32>,
     pub gui: Option<f32>,
+}
+
+/// GUI max displayed path lengths, in characters, for the Bookmarks and
+/// Recent dirs panels; longer paths are truncated from the front. `None` when
+/// the state file has no value for one, in which case the GUI uses its
+/// default. Like [FontSizes], the CLI never reads these — they live here only
+/// so a CLI-side save round-trips the GUI's values.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DirLabelLens {
+    pub bookmarks: Option<usize>,
+    pub recent_dirs: Option<usize>,
 }
 
 /// GUI tab layout persisted across runs: the working directory of each open

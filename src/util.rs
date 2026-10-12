@@ -431,6 +431,7 @@ pub fn read_browser_files(dir: &Path) -> Vec<BrowserFile> {
         };
 
         files.push(BrowserFile {
+            hidden_attr: has_hidden_attr(&entry),
             path,
             disp_name,
             is_folder,
@@ -445,6 +446,24 @@ pub fn read_browser_files(dir: &Path) -> Vec<BrowserFile> {
             .then_with(|| a.disp_name.to_lowercase().cmp(&b.disp_name.to_lowercase()))
     });
     files
+}
+
+/// Whether `entry` has the Windows Hidden attribute (e.g. `AppData`). Always
+/// `false` on other platforms, which have no such attribute.
+pub(crate) fn has_hidden_attr(entry: &fs::DirEntry) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+        entry
+            .metadata()
+            .is_ok_and(|m| m.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = entry;
+        false
+    }
 }
 
 pub fn get_home() -> Option<PathBuf> {
