@@ -53,10 +53,10 @@ pub struct State {
     /// reads or mutates this — it's held only so a CLI-side save round-trips
     /// the GUI's tabs back unchanged instead of dropping them.
     pub open_tabs: OpenTabs,
-    /// GUI terminal-pane font size. Like the fields above, the CLI never reads
-    /// or mutates this — held only so a CLI-side save writes the GUI's value
-    /// back unchanged instead of dropping the `FONT_SIZE` line.
-    pub font_size: Option<f32>,
+    /// GUI font sizes. Like the fields above, the CLI never reads or mutates
+    /// these — held only so a CLI-side save writes the GUI's values back
+    /// unchanged instead of dropping the `FONT_SIZE` line.
+    pub font_size: FontSizes,
     /// Cached git branch for `cwd`. `None` when cwd isn't inside a repo.
     /// Refreshed by `refresh_branch` after every command and after `cd` —
     /// branch can change behind our back via `git checkout`, so we re-check
@@ -88,7 +88,7 @@ impl Default for State {
             panel_vis: PanelVis::default(),
             window_size: None,
             open_tabs: OpenTabs::default(),
-            font_size: None,
+            font_size: FontSizes::default(),
             branch,
             active_remote: None,
         }
@@ -304,6 +304,17 @@ impl Default for PanelVis {
 pub struct WindowSize {
     pub x: f32,
     pub y: f32,
+}
+
+/// GUI font sizes, in points: `cli` for the terminal input/output panes, `gui`
+/// for the side panels. `None` when the state file has no value for one (it
+/// predates the setting, or was only ever saved by the CLI), in which case the
+/// GUI uses its default. Like [WindowSize], the CLI never reads these — they
+/// live here only so a CLI-side save round-trips the GUI's values.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FontSizes {
+    pub cli: Option<f32>,
+    pub gui: Option<f32>,
 }
 
 /// GUI tab layout persisted across runs: the working directory of each open

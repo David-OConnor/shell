@@ -213,7 +213,8 @@ fn cat(path: &Path) {
 /// browser runs independently of the shell, so we don't wait for it; a
 /// background thread reaps the launcher so it doesn't linger as a zombie.
 /// Explorer exits with 1 even on success, so its status isn't checked.
-fn open_dir(dir: &Path) {
+/// Launch failures go through `sink`, so the GUI can show them too.
+pub fn open_dir(dir: &Path, sink: OutputSink) {
     let launcher = if cfg!(windows) {
         "explorer"
     } else if cfg!(target_os = "macos") {
@@ -231,7 +232,10 @@ fn open_dir(dir: &Path) {
         Ok(mut child) => {
             std::thread::spawn(move || child.wait());
         }
-        Err(e) => eprintln!("open: failed to run {launcher}: {e}"),
+        Err(e) => sink(
+            OutKind::Stderr,
+            format!("open: failed to run {launcher}: {e}"),
+        ),
     }
 }
 
@@ -270,6 +274,64 @@ pub fn expand_alias(cmd: &str, args: &str) -> Option<String> {
     } else {
         format!("{prefix} {args}")
     })
+}
+
+/// A typed command line after the shared shorthand rewrites; see [expand_input].
+pub struct Expanded {
+    /// The command line to actually run.
+    pub line: String,
+    /// True when `line` should be echoed (`> {line}`) before running, because
+    /// it isn't recognisably what was typed: a bare-name clone's full URL.
+    pub echo: bool,
+}
+
+/// Apply every text-level rewrite the shell does to a typed command line
+/// before running it, in order:
+/// - git/cargo shorthands ([expand_alias]): `pull` -> `git pull`, `run` -> `cargo run`
+/// - `git clone <name>` -> `git clone <clone_root>/<name>` ([expand_clone])
+/// - `python`/`pip` -> the cwd's virtualenv copy, when it has one
+///
+/// Both frontends call this, so a new shorthand added here works in the CLI
+/// and the GUI alike. `local_cwd` is the working directory when the command
+/// runs locally, or `None` over SSH: the remote has no local dir to check for
+/// a same-named repo, and no local venv applies there.
+pub fn expand_input(input: &str, clone_root: Option<&str>, local_cwd: Option<&Path>) -> Expanded {
+    let input = input.trim();
+    let (cmd, args) = match input.find(char::is_whitespace) {
+        Some(i) => (&input[..i], input[i..].trim()),
+        None => (input, ""),
+    };
+
+    let aliased = expand_alias(cmd, args);
+    let line = aliased.as_deref().unwrap_or(input);
+
+    if let Some(root) = clone_root
+        && let Some(cloned) = expand_clone(line, root, local_cwd)
+    {
+        return Expanded {
+            line: cloned,
+            echo: true,
+        };
+    }
+
+    if let Some(cwd) = local_cwd {
+        let venv_exe = match cmd {
+            "python" | "python3" => crate::python::venv_python(cwd),
+            "pip" | "pip3" => crate::python::venv_pip(cwd),
+            _ => None,
+        };
+        if let Some(exe) = venv_exe {
+            return Expanded {
+                line: rewrite_venv_command(&exe, args),
+                echo: false,
+            };
+        }
+    }
+
+    Expanded {
+        line: line.to_owned(),
+        echo: false,
+    }
 }
 
 /// Runs one command line. Returns false if the shell should exit.
@@ -344,6 +406,10 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
                 match resolved {
                     Some((text, dir)) => {
                         println!("> {text}  (in {})", dir.display());
+                        // Expand shorthands (`run`, `pull`, …) so they work
+                        // here too; the system shell has never heard of them.
+                        let root = state.clone_roots.lock().ok().and_then(|r| r.last().cloned());
+                        let text = expand_input(&text, root.as_deref(), Some(&dir)).line;
                         let result = if cfg!(windows) {
                             Command::new("pwsh")
                                 .args(["-NoProfile", "-NoLogo", "-Command", &text])
@@ -383,27 +449,17 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
         eprintln!("warning: failed to save state: {e}");
     }
 
-    // Expand git/cargo shorthands (`pull` -> `git pull`, `run` -> `cargo run`,
-    // …) after recording history, so history keeps what the user typed. Done
-    // before the SSH branch so the remote, which has never heard of `pull`,
-    // receives the full command.
-    let expanded = expand_alias(cmd, args);
-    let input = expanded.as_deref().unwrap_or(input);
-
-    // `git clone <name>` -> `git clone <root>/<name>`, using the newest root
-    // saved from an earlier full-URL clone. Echoed, since the URL that runs
-    // isn't what was typed. A remote has no local directory to check for a
-    // same-named repo, hence no cwd there.
+    // Expand shorthands (`pull` -> `git pull`, `run` -> `cargo run`, bare-name
+    // clones, venv python/pip) after recording history, so history keeps what
+    // the user typed. Done before the SSH branch so the remote, which has
+    // never heard of `pull`, receives the full command.
     let local_cwd = state.active_remote.is_none().then_some(state.cwd.as_path());
-    let clone_expanded = state
-        .clone_roots
-        .lock()
-        .ok()
-        .and_then(|roots| expand_clone(input, roots.last()?, local_cwd));
-    if let Some(line) = &clone_expanded {
-        println!("> {line}");
+    let newest_root = state.clone_roots.lock().ok().and_then(|r| r.last().cloned());
+    let expanded = expand_input(input, newest_root.as_deref(), local_cwd);
+    if expanded.echo {
+        println!("> {}", expanded.line);
     }
-    let input = clone_expanded.as_deref().unwrap_or(input);
+    let input = expanded.line.as_str();
 
     // While an SSH session is live, typed commands run on the remote rather
     // than locally. Only the session-management keywords are intercepted here;
@@ -515,7 +571,7 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
 
         "rm_targets" => crate::cargo_targets::rm_targets(&state.cwd),
 
-        "open" => open_dir(&state.cwd),
+        "open" => open_dir(&state.cwd, &mut |_, msg| eprintln!("{msg}")),
 
         // On linux, this is likely the same as the system `cat` command, but it works on Windows.
         // Another approach may be to only apply this branch on Windows.
@@ -656,29 +712,9 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
             }
         }
 
-        // `python` (or `python3`): when the current directory holds a virtual
-        // environment, run that venv's interpreter instead of whatever `python`
-        // resolves to on PATH. Falls through to the normal passthrough when
-        // there's no venv, so the system python still works as before.
-        "python" | "python3" => {
-            match crate::python::venv_python(&state.cwd) {
-                Some(interpreter) => run_passthrough(&rewrite_venv_command(&interpreter, args)),
-                None => run_passthrough(input),
-            };
-        }
-
-        // `pip` (or `pip3`): same idea as `python` above — when the cwd holds a
-        // venv, run that venv's `pip` so installs land in the environment rather
-        // than the system site-packages. Falls through otherwise.
-        "pip" | "pip3" => {
-            match crate::python::venv_pip(&state.cwd) {
-                Some(pip) => run_passthrough(&rewrite_venv_command(&pip, args)),
-                None => run_passthrough(input),
-            };
-        }
-
         // Everything else: Pass through to the system shell (e.g. the one which we launched this
-        // application from)
+        // application from). Shorthands, including venv `python`/`pip`, were
+        // already rewritten by [expand_input] above.
         _ => {
             // A successful clone from a full URL saves the URL's root, so later
             // clones from the same place need only the repo name. Only on
@@ -909,10 +945,17 @@ pub fn shelp_text(frontend: Frontend) -> String {
             "Connect to a host; `ssh <number>` connects to a saved remote",
         ),
         ("remote list", "List saved remotes with their indices"),
-        (
-            "remote add [user@]host[:port]",
-            "Save a remote, prompting for a password to keep in the OS keyring",
-        ),
+        if cli {
+            (
+                "remote add [user@]host[:port]",
+                "Save a remote, prompting for a password to keep in the OS keyring",
+            )
+        } else {
+            (
+                "remote add [user@]host[:port]",
+                "Open the Remote panel's form, filled in, to enter a password and save",
+            )
+        },
         (
             "remote del <number>",
             "Forget a saved remote, and its stored password",
@@ -1035,5 +1078,19 @@ mod tests {
             Some("cargo +nightly fmt")
         );
         assert_eq!(expand_alias("ls", ""), None);
+    }
+
+    #[test]
+    fn expands_input() {
+        let e = expand_input("  run release ", None, None);
+        assert_eq!(e.line, "cargo run --release");
+        assert!(!e.echo);
+
+        let e = expand_input("fmt", None, None);
+        assert_eq!(e.line, "cargo +nightly fmt");
+
+        let e = expand_input("ls -la", None, None);
+        assert_eq!(e.line, "ls -la");
+        assert!(!e.echo);
     }
 }

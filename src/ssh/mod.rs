@@ -481,7 +481,7 @@ fn read_password(prompt: &str) -> io::Result<String> {
 /// single `&&`-chained line so it stops on the first failure, run from the
 /// session's tracked remote cwd. Returns `None` (after emitting a diagnostic
 /// via `sink`) when the commit message is empty, matching the local guard.
-pub(crate) fn remote_sync_command(message: &str, sink: OutputSink) -> Option<String> {
+pub fn remote_sync_command(message: &str, sink: OutputSink) -> Option<String> {
     let message = message.trim().trim_matches('"');
     if message.is_empty() {
         sink(
@@ -506,7 +506,7 @@ pub(crate) fn remote_sync_command(message: &str, sink: OutputSink) -> Option<Str
 /// remote, otherwise sudo's prompt surfaces as a stderr diagnostic. Returns
 /// `None` (after emitting a diagnostic via `sink`) when the service name is
 /// empty, matching the local guard.
-pub(crate) fn remote_logs_command(service: &str, sink: OutputSink) -> Option<String> {
+pub fn remote_logs_command(service: &str, sink: OutputSink) -> Option<String> {
     let service = service.trim().trim_matches('"');
     if service.is_empty() {
         sink(

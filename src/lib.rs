@@ -20,7 +20,7 @@ pub use input_completion::{
 pub use python::{VENV_PREFIX, venv_python};
 pub use ssh::{RemoteSession, SshMode};
 pub use state::{
-    BrowserFile, HistoryItem, NavState, OpenTabs, PanelVis, RecentDir, RemoteTerminal, WindowSize,
+    BrowserFile, FontSizes, HistoryItem, NavState, OpenTabs, PanelVis, RecentDir, RemoteTerminal, WindowSize,
     dedup_history, record_clone_root, record_history, record_recent_dir,
 };
 pub use util::{

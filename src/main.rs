@@ -20,7 +20,7 @@ use rustyline::{
     validate::Validator,
 };
 use shell::{
-    DISP_PAGE_LEN, NavState, OpenTabs, PanelVis, RemoteTerminal, WindowSize, commands,
+    DISP_PAGE_LEN, FontSizes, NavState, OpenTabs, PanelVis, RemoteTerminal, WindowSize, commands,
     complete_cd_path, complete_clone_url, complete_command_path, page_count, save_data,
     state::{HistoryItem, RecentDir},
 };
@@ -404,7 +404,7 @@ struct BookmarkHandler {
     open_tabs: OpenTabs,
     /// Snapshot of the GUI font size, written back unchanged for the same
     /// reason as `panel_vis`.
-    font_size: Option<f32>,
+    font_size: FontSizes,
     save_path: PathBuf,
     printer: SharedPrinter,
     /// Shared recall state. After adding a bookmark we stash the current input

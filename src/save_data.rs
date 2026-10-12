@@ -24,7 +24,7 @@ use std::{
 
 use chrono::{DateTime, SecondsFormat, Utc};
 
-use crate::state::{HistoryItem, OpenTabs, PanelVis, RecentDir, RemoteTerminal, WindowSize};
+use crate::state::{FontSizes, HistoryItem, OpenTabs, PanelVis, RecentDir, RemoteTerminal, WindowSize};
 
 pub const FILENAME: &str = "shell_state.ss";
 
@@ -60,10 +60,10 @@ pub struct LoadedState {
     /// is empty when the file has no `OPEN_TAB` lines (predates the feature
     /// or a CLI-only file), in which case the GUI opens a single default tab.
     pub open_tabs: OpenTabs,
-    /// GUI terminal-pane font size, in points. `None` when the file has no
-    /// `FONT_SIZE` line (predates the feature, or a CLI-only save), in which
-    /// case the GUI falls back to its default size.
-    pub font_size: Option<f32>,
+    /// GUI font sizes, in points. Each is `None` when the `FONT_SIZE` line
+    /// lacks it (or there's no such line: it predates the feature, or a
+    /// CLI-only save), in which case the GUI falls back to its default size.
+    pub font_size: FontSizes,
 }
 
 /// Where the state file lives by default: `<home>/shell_state.ss`. Falls back
@@ -85,7 +85,7 @@ pub fn save_state(
     panel_vis: &PanelVis,
     window_size: Option<WindowSize>,
     open_tabs: &OpenTabs,
-    font_size: Option<f32>,
+    font_size: FontSizes,
     path: &Path,
 ) -> io::Result<()> {
     if let Some(parent) = path.parent()
@@ -153,10 +153,19 @@ pub fn save_state(
         writeln!(f, "{ACTIVE_TAB_TAG}{}", open_tabs.active)?;
     }
 
-    // FontSize: GUI-only. Like WINDOW_SIZE, written only when present so a
-    // CLI-side save (which passes `None`) preserves whatever the GUI recorded.
-    if let Some(size) = font_size {
-        writeln!(f, "{FONT_SIZE_TAG}size={}", size)?;
+    // FontSize: GUI-only. `size` is the terminal panes' (CLI) size and `gui`
+    // the side panels'. Like WINDOW_SIZE, written only when present, so the
+    // CLI's saves (which pass back what they loaded) preserve the GUI's values.
+    if font_size.cli.is_some() || font_size.gui.is_some() {
+        write!(f, "{FONT_SIZE_TAG}")?;
+        let mut pairs = Vec::new();
+        if let Some(size) = font_size.cli {
+            pairs.push(format!("size={size}"));
+        }
+        if let Some(size) = font_size.gui {
+            pairs.push(format!("gui={size}"));
+        }
+        writeln!(f, "{}", pairs.join(" "))?;
     }
 
     for rt in remote_terminals {
@@ -202,7 +211,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
                 panel_vis: PanelVis::default(),
                 window_size: None,
                 open_tabs: OpenTabs::default(),
-                font_size: None,
+                font_size: FontSizes::default(),
             });
         }
         Err(e) => return Err(e),
@@ -216,7 +225,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
     let mut panel_vis = PanelVis::default();
     let mut window_size = None;
     let mut open_tabs = OpenTabs::default();
-    let mut font_size = None;
+    let mut font_size = FontSizes::default();
 
     for line in BufReader::new(file).lines() {
         let line = line?;
@@ -327,19 +336,23 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix(FONT_SIZE_TAG) {
-            // Parse `size=<points>`. Only adopt a positive, finite value — a
-            // malformed or degenerate entry leaves `font_size` at `None` so the
-            // GUI uses its default rather than a zero-height font.
+            // Parse `size=<points> gui=<points>`. Only adopt positive, finite
+            // values — a malformed or degenerate entry leaves that size at
+            // `None` so the GUI uses its default rather than a zero-height font.
             for pair in rest.split_whitespace() {
                 let Some((k, v)) = pair.split_once('=') else {
                     continue;
                 };
-                if k == "size"
-                    && let Ok(s) = v.parse::<f32>()
-                    && s.is_finite()
-                    && s > 0.0
-                {
-                    font_size = Some(s);
+                let Ok(s) = v.parse::<f32>() else {
+                    continue;
+                };
+                if !s.is_finite() || s <= 0.0 {
+                    continue;
+                }
+                match k {
+                    "size" => font_size.cli = Some(s),
+                    "gui" => font_size.gui = Some(s),
+                    _ => {}
                 }
             }
             continue;
@@ -404,12 +417,44 @@ mod tests {
             &PanelVis::default(),
             None,
             &OpenTabs::default(),
-            None,
+            FontSizes::default(),
             &path,
         )
         .unwrap();
         let loaded = load_state(&path).unwrap();
         let _ = fs::remove_file(&path);
         assert_eq!(loaded.clone_roots, roots);
+    }
+
+    #[test]
+    fn font_sizes_round_trip() {
+        let path = std::env::temp_dir().join("shell_save_data_test_font_sizes.ss");
+        for sizes in [
+            FontSizes::default(),
+            FontSizes {
+                cli: Some(14.0),
+                gui: None,
+            },
+            FontSizes {
+                cli: Some(14.0),
+                gui: Some(9.5),
+            },
+        ] {
+            save_state(
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &PanelVis::default(),
+                None,
+                &OpenTabs::default(),
+                sizes,
+                &path,
+            )
+            .unwrap();
+            assert_eq!(load_state(&path).unwrap().font_size, sizes);
+        }
+        let _ = fs::remove_file(&path);
     }
 }
