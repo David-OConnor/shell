@@ -25,7 +25,8 @@ use std::{
 use chrono::{DateTime, SecondsFormat, Utc};
 
 use crate::state::{
-    DirLabelLens, FontSizes, HistoryItem, OpenTabs, PanelVis, RecentDir, RemoteTerminal, WindowSize,
+    DirLabelLens, FontSizes, HistoryItem, OpenTabs, PanelVis, PanelWidths, RecentDir,
+    RemoteTerminal, WindowSize,
 };
 
 pub const FILENAME: &str = "shell_state.ss";
@@ -40,6 +41,7 @@ const OPEN_TAB_TAG: &str = "OPEN_TAB ";
 const ACTIVE_TAB_TAG: &str = "ACTIVE_TAB ";
 const FONT_SIZE_TAG: &str = "FONT_SIZE ";
 const DIR_LABEL_LEN_TAG: &str = "DIR_LABEL_LEN ";
+const PANEL_WIDTH_TAG: &str = "PANEL_WIDTH ";
 const CLONE_ROOT_TAG: &str = "CLONE_ROOT ";
 
 /// Bundle of everything `load_state` returns. Lets callers destructure
@@ -70,6 +72,9 @@ pub struct LoadedState {
     /// GUI Bookmarks / Recent dirs path lengths, in characters. Each is `None`
     /// when the `DIR_LABEL_LEN` line lacks it, as with `font_size`.
     pub dir_label_lens: DirLabelLens,
+    /// GUI side-panel widths, in points. Each is `None` when the `PANEL_WIDTH`
+    /// line lacks it, as with `font_size`.
+    pub panel_widths: PanelWidths,
 }
 
 /// Where the state file lives by default: `<home>/shell_state.ss`. Falls back
@@ -93,6 +98,7 @@ pub fn save_state(
     open_tabs: &OpenTabs,
     font_size: FontSizes,
     dir_label_lens: DirLabelLens,
+    panel_widths: PanelWidths,
     path: &Path,
 ) -> io::Result<()> {
     if let Some(parent) = path.parent()
@@ -188,6 +194,24 @@ pub fn save_state(
         writeln!(f, "{}", pairs.join(" "))?;
     }
 
+    // PanelWidth: GUI-only, written only when present, like FONT_SIZE. Keys
+    // match PANEL_VIS.
+    let widths = [
+        ("bookmarks", panel_widths.bookmarks),
+        ("recent_dirs", panel_widths.recent_dirs),
+        ("recent_cmds", panel_widths.recent_cmds),
+        ("recent_cmds_in_dir", panel_widths.recent_cmds_in_dir),
+        ("remote_terminals", panel_widths.remote_terminals),
+        ("file_browser", panel_widths.file_browser),
+    ];
+    let pairs: Vec<String> = widths
+        .iter()
+        .filter_map(|(k, w)| w.map(|w| format!("{k}={w}")))
+        .collect();
+    if !pairs.is_empty() {
+        writeln!(f, "{PANEL_WIDTH_TAG}{}", pairs.join(" "))?;
+    }
+
     for rt in remote_terminals {
         // Only non-secret connection details go on disk; the password lives in
         // the OS keyring (see `crate::secrets`). Format is host\tport\tusername.
@@ -233,6 +257,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
                 open_tabs: OpenTabs::default(),
                 font_size: FontSizes::default(),
                 dir_label_lens: DirLabelLens::default(),
+                panel_widths: PanelWidths::default(),
             });
         }
         Err(e) => return Err(e),
@@ -248,6 +273,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
     let mut open_tabs = OpenTabs::default();
     let mut font_size = FontSizes::default();
     let mut dir_label_lens = DirLabelLens::default();
+    let mut panel_widths = PanelWidths::default();
 
     for line in BufReader::new(file).lines() {
         let line = line?;
@@ -400,6 +426,33 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
             }
             continue;
         }
+        if let Some(rest) = trimmed.strip_prefix(PANEL_WIDTH_TAG) {
+            // Parse `bookmarks=<points> recent_dirs=<points> ...`. Only adopt
+            // positive, finite values, as with FONT_SIZE; anything else leaves
+            // that panel at `None` (the GUI's default width).
+            for pair in rest.split_whitespace() {
+                let Some((k, v)) = pair.split_once('=') else {
+                    continue;
+                };
+                let Ok(w) = v.parse::<f32>() else {
+                    continue;
+                };
+                if !w.is_finite() || w <= 0.0 {
+                    continue;
+                }
+                let w = Some(w);
+                match k {
+                    "bookmarks" => panel_widths.bookmarks = w,
+                    "recent_dirs" => panel_widths.recent_dirs = w,
+                    "recent_cmds" => panel_widths.recent_cmds = w,
+                    "recent_cmds_in_dir" => panel_widths.recent_cmds_in_dir = w,
+                    "remote_terminals" => panel_widths.remote_terminals = w,
+                    "file_browser" => panel_widths.file_browser = w,
+                    _ => {}
+                }
+            }
+            continue;
+        }
         if let Some(rest) = trimmed.strip_prefix(REMOTE_TERMINAL_TAG) {
             let rest = rest.trim_end_matches('\r');
 
@@ -438,6 +491,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
         open_tabs,
         font_size,
         dir_label_lens,
+        panel_widths,
     })
 }
 
@@ -463,6 +517,7 @@ mod tests {
             &OpenTabs::default(),
             FontSizes::default(),
             DirLabelLens::default(),
+            PanelWidths::default(),
             &path,
         )
         .unwrap();
@@ -496,6 +551,7 @@ mod tests {
                 &OpenTabs::default(),
                 sizes,
                 DirLabelLens::default(),
+                PanelWidths::default(),
                 &path,
             )
             .unwrap();
@@ -529,10 +585,49 @@ mod tests {
                 &OpenTabs::default(),
                 FontSizes::default(),
                 lens,
+                PanelWidths::default(),
                 &path,
             )
             .unwrap();
             assert_eq!(load_state(&path).unwrap().dir_label_lens, lens);
+        }
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn panel_widths_round_trip() {
+        let path = std::env::temp_dir().join("shell_save_data_test_panel_widths.ss");
+        for widths in [
+            PanelWidths::default(),
+            PanelWidths {
+                bookmarks: Some(212.5),
+                ..Default::default()
+            },
+            PanelWidths {
+                bookmarks: Some(150.0),
+                recent_dirs: Some(175.25),
+                recent_cmds: Some(180.0),
+                recent_cmds_in_dir: Some(300.0),
+                remote_terminals: Some(90.0),
+                file_browser: Some(410.75),
+            },
+        ] {
+            save_state(
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &PanelVis::default(),
+                None,
+                &OpenTabs::default(),
+                FontSizes::default(),
+                DirLabelLens::default(),
+                widths,
+                &path,
+            )
+            .unwrap();
+            assert_eq!(load_state(&path).unwrap().panel_widths, widths);
         }
         let _ = fs::remove_file(&path);
     }

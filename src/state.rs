@@ -60,6 +60,9 @@ pub struct State {
     /// GUI Bookmarks / Recent dirs path lengths. Held only to round-trip the
     /// `DIR_LABEL_LEN` line, like `font_size`.
     pub dir_label_lens: DirLabelLens,
+    /// GUI side-panel widths. Held only to round-trip the `PANEL_WIDTH` line,
+    /// like `font_size`.
+    pub panel_widths: PanelWidths,
     /// Cached git branch for `cwd`. `None` when cwd isn't inside a repo.
     /// Refreshed by `refresh_branch` after every command and after `cd` —
     /// branch can change behind our back via `git checkout`, so we re-check
@@ -93,6 +96,7 @@ impl Default for State {
             open_tabs: OpenTabs::default(),
             font_size: FontSizes::default(),
             dir_label_lens: DirLabelLens::default(),
+            panel_widths: PanelWidths::default(),
             branch,
             active_remote: None,
         }
@@ -209,6 +213,7 @@ impl State {
             &self.open_tabs,
             self.font_size,
             self.dir_label_lens,
+            self.panel_widths,
             path,
         )
     }
@@ -235,6 +240,7 @@ impl State {
             open_tabs: loaded.open_tabs,
             font_size: loaded.font_size,
             dir_label_lens: loaded.dir_label_lens,
+            panel_widths: loaded.panel_widths,
             branch,
             active_remote: None,
         })
@@ -335,6 +341,21 @@ pub struct FontSizes {
 pub struct DirLabelLens {
     pub bookmarks: Option<usize>,
     pub recent_dirs: Option<usize>,
+}
+
+/// GUI side-panel widths, in logical points, as the user last dragged them.
+/// Fields mirror [PanelVis]. `None` when the state file has no value for one,
+/// in which case the GUI uses that panel's default width. Like [FontSizes],
+/// the CLI never reads these — they live here only so a CLI-side save
+/// round-trips the GUI's values.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PanelWidths {
+    pub bookmarks: Option<f32>,
+    pub recent_dirs: Option<f32>,
+    pub recent_cmds: Option<f32>,
+    pub recent_cmds_in_dir: Option<f32>,
+    pub remote_terminals: Option<f32>,
+    pub file_browser: Option<f32>,
 }
 
 /// GUI tab layout persisted across runs: the working directory of each open
