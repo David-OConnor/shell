@@ -63,6 +63,9 @@ pub struct State {
     /// GUI side-panel widths. Held only to round-trip the `PANEL_WIDTH` line,
     /// like `font_size`.
     pub panel_widths: PanelWidths,
+    /// GUI Files-panel toggles. Held only to round-trip the `FILES_PANEL`
+    /// line, like `font_size`.
+    pub files_panel: FilesPanelPrefs,
     /// Cached git branch for `cwd`. `None` when cwd isn't inside a repo.
     /// Refreshed by `refresh_branch` after every command and after `cd` —
     /// branch can change behind our back via `git checkout`, so we re-check
@@ -97,6 +100,7 @@ impl Default for State {
             font_size: FontSizes::default(),
             dir_label_lens: DirLabelLens::default(),
             panel_widths: PanelWidths::default(),
+            files_panel: FilesPanelPrefs::default(),
             branch,
             active_remote: None,
         }
@@ -214,6 +218,7 @@ impl State {
             self.font_size,
             self.dir_label_lens,
             self.panel_widths,
+            self.files_panel,
             path,
         )
     }
@@ -241,6 +246,7 @@ impl State {
             font_size: loaded.font_size,
             dir_label_lens: loaded.dir_label_lens,
             panel_widths: loaded.panel_widths,
+            files_panel: loaded.files_panel,
             branch,
             active_remote: None,
         })
@@ -296,6 +302,8 @@ pub struct PanelVis {
     pub recent_cmds_in_dir: bool,
     pub remote_terminals: bool,
     pub file_browser: bool,
+    /// The PATH editor (`shell_gui`'s PATH panel).
+    pub path_editor: bool,
 }
 
 impl Default for PanelVis {
@@ -307,6 +315,7 @@ impl Default for PanelVis {
             recent_cmds_in_dir: true,
             remote_terminals: false,
             file_browser: true,
+            path_editor: false,
         }
     }
 }
@@ -356,6 +365,21 @@ pub struct PanelWidths {
     pub recent_cmds_in_dir: Option<f32>,
     pub remote_terminals: Option<f32>,
     pub file_browser: Option<f32>,
+    pub path_editor: Option<f32>,
+}
+
+/// GUI Files-panel toggles, as the user last left them: whether entries with
+/// the Windows Hidden attribute (`show_hidden`) and names starting with `.`
+/// (`show_dotfiles`) are listed, and whether Deep search matches file names
+/// rather than contents (`deep_search_names`). `None` when the state file has
+/// no value for one, in which case the GUI uses its default. Like
+/// [PanelWidths], the CLI never reads these — they live here only so a
+/// CLI-side save round-trips the GUI's values.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FilesPanelPrefs {
+    pub show_hidden: Option<bool>,
+    pub show_dotfiles: Option<bool>,
+    pub deep_search_names: Option<bool>,
 }
 
 /// GUI tab layout persisted across runs: the working directory of each open
@@ -535,7 +559,8 @@ impl NavState {
             }
             (None, false) => return None,
             (Some(0), true) => return None,
-            (Some(c), true) => Some(c - 1),
+            // Clamped: entries may have been removed since `c` was set.
+            (Some(c), true) => Some((c - 1).min(len - 1)),
             (Some(c), false) => {
                 if c + 1 < len {
                     Some(c + 1)

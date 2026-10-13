@@ -25,8 +25,8 @@ use std::{
 use chrono::{DateTime, SecondsFormat, Utc};
 
 use crate::state::{
-    DirLabelLens, FontSizes, HistoryItem, OpenTabs, PanelVis, PanelWidths, RecentDir,
-    RemoteTerminal, WindowSize,
+    DirLabelLens, FilesPanelPrefs, FontSizes, HistoryItem, OpenTabs, PanelVis, PanelWidths,
+    RecentDir, RemoteTerminal, WindowSize,
 };
 
 pub const FILENAME: &str = "shell_state.ss";
@@ -42,6 +42,7 @@ const ACTIVE_TAB_TAG: &str = "ACTIVE_TAB ";
 const FONT_SIZE_TAG: &str = "FONT_SIZE ";
 const DIR_LABEL_LEN_TAG: &str = "DIR_LABEL_LEN ";
 const PANEL_WIDTH_TAG: &str = "PANEL_WIDTH ";
+const FILES_PANEL_TAG: &str = "FILES_PANEL ";
 const CLONE_ROOT_TAG: &str = "CLONE_ROOT ";
 
 /// Bundle of everything `load_state` returns. Lets callers destructure
@@ -75,6 +76,9 @@ pub struct LoadedState {
     /// GUI side-panel widths, in points. Each is `None` when the `PANEL_WIDTH`
     /// line lacks it, as with `font_size`.
     pub panel_widths: PanelWidths,
+    /// GUI Files-panel toggles. Each is `None` when the `FILES_PANEL` line
+    /// lacks it, as with `font_size`.
+    pub files_panel: FilesPanelPrefs,
 }
 
 /// Where the state file lives by default: `<home>/shell_state.ss`. Falls back
@@ -99,6 +103,7 @@ pub fn save_state(
     font_size: FontSizes,
     dir_label_lens: DirLabelLens,
     panel_widths: PanelWidths,
+    files_panel: FilesPanelPrefs,
     path: &Path,
 ) -> io::Result<()> {
     if let Some(parent) = path.parent()
@@ -143,13 +148,14 @@ pub fn save_state(
     // are skipped on load; missing keys keep their default value.
     writeln!(
         f,
-        "{PANEL_VIS_TAG}bookmarks={} recent_dirs={} recent_cmds={} recent_cmds_in_dir={} remote_terminals={} file_browser={}",
+        "{PANEL_VIS_TAG}bookmarks={} recent_dirs={} recent_cmds={} recent_cmds_in_dir={} remote_terminals={} file_browser={} path_editor={}",
         bool_to_int(panel_vis.bookmarks),
         bool_to_int(panel_vis.recent_dirs),
         bool_to_int(panel_vis.recent_cmds),
         bool_to_int(panel_vis.recent_cmds_in_dir),
         bool_to_int(panel_vis.remote_terminals),
         bool_to_int(panel_vis.file_browser),
+        bool_to_int(panel_vis.path_editor),
     )?;
 
     // GUI-only. Written only when present so a CLI-side save
@@ -203,6 +209,7 @@ pub fn save_state(
         ("recent_cmds_in_dir", panel_widths.recent_cmds_in_dir),
         ("remote_terminals", panel_widths.remote_terminals),
         ("file_browser", panel_widths.file_browser),
+        ("path_editor", panel_widths.path_editor),
     ];
     let pairs: Vec<String> = widths
         .iter()
@@ -210,6 +217,21 @@ pub fn save_state(
         .collect();
     if !pairs.is_empty() {
         writeln!(f, "{PANEL_WIDTH_TAG}{}", pairs.join(" "))?;
+    }
+
+    // FilesPanel: GUI-only, written only when present, like FONT_SIZE.
+    // `key=0|1` pairs, like PANEL_VIS.
+    let toggles = [
+        ("hidden", files_panel.show_hidden),
+        ("dotfiles", files_panel.show_dotfiles),
+        ("deep_search_names", files_panel.deep_search_names),
+    ];
+    let pairs: Vec<String> = toggles
+        .iter()
+        .filter_map(|(k, on)| on.map(|on| format!("{k}={}", bool_to_int(on))))
+        .collect();
+    if !pairs.is_empty() {
+        writeln!(f, "{FILES_PANEL_TAG}{}", pairs.join(" "))?;
     }
 
     for rt in remote_terminals {
@@ -258,6 +280,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
                 font_size: FontSizes::default(),
                 dir_label_lens: DirLabelLens::default(),
                 panel_widths: PanelWidths::default(),
+                files_panel: FilesPanelPrefs::default(),
             });
         }
         Err(e) => return Err(e),
@@ -274,6 +297,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
     let mut font_size = FontSizes::default();
     let mut dir_label_lens = DirLabelLens::default();
     let mut panel_widths = PanelWidths::default();
+    let mut files_panel = FilesPanelPrefs::default();
 
     for line in BufReader::new(file).lines() {
         let line = line?;
@@ -340,6 +364,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
                     "recent_cmds_in_dir" => panel_vis.recent_cmds_in_dir = on,
                     "remote_terminals" => panel_vis.remote_terminals = on,
                     "file_browser" => panel_vis.file_browser = on,
+                    "path_editor" => panel_vis.path_editor = on,
                     _ => {}
                 }
             }
@@ -448,6 +473,25 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
                     "recent_cmds_in_dir" => panel_widths.recent_cmds_in_dir = w,
                     "remote_terminals" => panel_widths.remote_terminals = w,
                     "file_browser" => panel_widths.file_browser = w,
+                    "path_editor" => panel_widths.path_editor = w,
+                    _ => {}
+                }
+            }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix(FILES_PANEL_TAG) {
+            // Parse `hidden=0|1 dotfiles=0|1 deep_search_names=0|1`, like
+            // PANEL_VIS. Unknown keys are ignored; a missing one stays `None`
+            // (the GUI's default).
+            for pair in rest.split_whitespace() {
+                let Some((k, v)) = pair.split_once('=') else {
+                    continue;
+                };
+                let on = Some(v == "1" || v.eq_ignore_ascii_case("true"));
+                match k {
+                    "hidden" => files_panel.show_hidden = on,
+                    "dotfiles" => files_panel.show_dotfiles = on,
+                    "deep_search_names" => files_panel.deep_search_names = on,
                     _ => {}
                 }
             }
@@ -492,6 +536,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
         font_size,
         dir_label_lens,
         panel_widths,
+        files_panel,
     })
 }
 
@@ -518,6 +563,7 @@ mod tests {
             FontSizes::default(),
             DirLabelLens::default(),
             PanelWidths::default(),
+            FilesPanelPrefs::default(),
             &path,
         )
         .unwrap();
@@ -552,6 +598,7 @@ mod tests {
                 sizes,
                 DirLabelLens::default(),
                 PanelWidths::default(),
+                FilesPanelPrefs::default(),
                 &path,
             )
             .unwrap();
@@ -586,6 +633,7 @@ mod tests {
                 FontSizes::default(),
                 lens,
                 PanelWidths::default(),
+                FilesPanelPrefs::default(),
                 &path,
             )
             .unwrap();
@@ -610,6 +658,7 @@ mod tests {
                 recent_cmds_in_dir: Some(300.0),
                 remote_terminals: Some(90.0),
                 file_browser: Some(410.75),
+                path_editor: Some(260.0),
             },
         ] {
             save_state(
@@ -624,10 +673,47 @@ mod tests {
                 FontSizes::default(),
                 DirLabelLens::default(),
                 widths,
+                FilesPanelPrefs::default(),
                 &path,
             )
             .unwrap();
             assert_eq!(load_state(&path).unwrap().panel_widths, widths);
+        }
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn files_panel_round_trip() {
+        let path = std::env::temp_dir().join("shell_save_data_test_files_panel.ss");
+        for prefs in [
+            FilesPanelPrefs::default(),
+            FilesPanelPrefs {
+                show_dotfiles: Some(false),
+                ..Default::default()
+            },
+            FilesPanelPrefs {
+                show_hidden: Some(false),
+                show_dotfiles: Some(true),
+                deep_search_names: Some(true),
+            },
+        ] {
+            save_state(
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &PanelVis::default(),
+                None,
+                &OpenTabs::default(),
+                FontSizes::default(),
+                DirLabelLens::default(),
+                PanelWidths::default(),
+                prefs,
+                &path,
+            )
+            .unwrap();
+            assert_eq!(load_state(&path).unwrap().files_panel, prefs);
         }
         let _ = fs::remove_file(&path);
     }

@@ -5,6 +5,7 @@ use std::{
     env,
     ffi::OsStr,
     fs,
+    io::{self, Write},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -172,6 +173,111 @@ pub fn find_bookmark(bookmarks: &[PathBuf], query: &str) -> Option<PathBuf> {
 
 pub fn find_recent_dir(recent: &[RecentDir], query: &str) -> Option<PathBuf> {
     best_path_match(recent.iter().map(|r| r.path.as_path()), query).map(Path::to_path_buf)
+}
+
+/// A saved directory list a `cd` target can be picked from. When the target
+/// turns out to no longer exist, both frontends offer to remove it from its
+/// list (see [stale_dir_list]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DirList {
+    RecentDirs,
+    Bookmarks,
+}
+
+impl DirList {
+    /// The list as it reads in a sentence: "Remove ~/old from recent dirs".
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::RecentDirs => "recent dirs",
+            Self::Bookmarks => "bookmarks",
+        }
+    }
+
+    /// One entry of the list: "Keep this bookmark".
+    pub fn entry_name(self) -> &'static str {
+        match self {
+            Self::RecentDirs => "recent dir",
+            Self::Bookmarks => "bookmark",
+        }
+    }
+}
+
+/// Whether `path` is gone from disk. Not merely unreadable, or on a drive
+/// that isn't ready: those may come back, so a saved entry for one is kept.
+pub fn dir_missing(path: &Path) -> bool {
+    fs::metadata(path).is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
+}
+
+/// Remove every recent dir that's gone from disk (see [dir_missing]).
+/// Returns the removed paths, oldest first.
+pub fn remove_missing_recent_dirs(recent_dirs: &mut Vec<RecentDir>) -> Vec<PathBuf> {
+    let mut removed = Vec::new();
+    recent_dirs.retain(|r| {
+        let missing = dir_missing(&r.path);
+        if missing {
+            removed.push(r.path.clone());
+        }
+        !missing
+    });
+    removed
+}
+
+/// After a `cd` to `target` failed, the saved list to offer to remove it from:
+/// `None` unless `target` is gone from disk (see [dir_missing]) and a list
+/// holds it. `from`, the list it was picked from, wins when both do.
+pub fn stale_dir_list(
+    target: &Path,
+    from: DirList,
+    bookmarks: &[PathBuf],
+    recent_dirs: &[RecentDir],
+) -> Option<DirList> {
+    if !dir_missing(target) {
+        return None;
+    }
+    let other = match from {
+        DirList::RecentDirs => DirList::Bookmarks,
+        DirList::Bookmarks => DirList::RecentDirs,
+    };
+    [from, other].into_iter().find(|list| match list {
+        DirList::RecentDirs => recent_dirs.iter().any(|r| r.path == target),
+        DirList::Bookmarks => bookmarks.iter().any(|p| p == target),
+    })
+}
+
+/// Remove `path` from `list`. Matched by path rather than index, so a list
+/// that shifted since the entry was picked loses the right row. Returns
+/// whether it was there.
+pub fn remove_saved_dir(
+    list: DirList,
+    path: &Path,
+    bookmarks: &mut Vec<PathBuf>,
+    recent_dirs: &mut Vec<RecentDir>,
+) -> bool {
+    match list {
+        DirList::RecentDirs => {
+            let len = recent_dirs.len();
+            recent_dirs.retain(|r| r.path != path);
+            recent_dirs.len() != len
+        }
+        DirList::Bookmarks => {
+            let len = bookmarks.len();
+            bookmarks.retain(|p| p != path);
+            bookmarks.len() != len
+        }
+    }
+}
+
+/// Ask a yes/no question on stdin. Only `y` or `yes` (any case) count as yes,
+/// so a stray Enter, or end of input, takes the cautious answer.
+pub(crate) fn confirm(question: &str) -> bool {
+    print!("{question} [y/N] ");
+    let _ = io::stdout().flush();
+
+    let mut answer = String::new();
+    if io::stdin().read_line(&mut answer).is_err() {
+        return false;
+    }
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
 /// The entry of `paths` that best matches `query`, case-insensitively. The
@@ -490,5 +596,93 @@ mod find_path_tests {
         assert_eq!(find("shell_"), bookmarks[1]);
         // Only the full path matches, so the newest bookmark wins.
         assert_eq!(find("code"), bookmarks[1]);
+    }
+}
+
+#[cfg(test)]
+mod stale_dir_tests {
+    use chrono::Utc;
+
+    use super::*;
+
+    #[test]
+    fn offers_only_missing_saved_dirs_preferring_the_source_list() {
+        let base = env::temp_dir().join(format!("shell_stale_dir_{}", std::process::id()));
+        let live = base.join("live");
+        let gone = base.join("gone");
+        let unsaved = base.join("unsaved");
+        fs::create_dir_all(&live).unwrap();
+
+        let recent = |p: &Path| RecentDir {
+            path: p.to_path_buf(),
+            dt: Utc::now(),
+        };
+        let mut bookmarks = vec![live.clone(), gone.clone()];
+        let mut recent_dirs = vec![recent(&live), recent(&gone)];
+
+        // A dir that exists, or one in neither list, gets no offer.
+        assert_eq!(
+            stale_dir_list(&live, DirList::Bookmarks, &bookmarks, &recent_dirs),
+            None
+        );
+        assert_eq!(
+            stale_dir_list(&unsaved, DirList::Bookmarks, &bookmarks, &recent_dirs),
+            None
+        );
+        // In both lists: the one it was picked from.
+        for from in [DirList::Bookmarks, DirList::RecentDirs] {
+            assert_eq!(
+                stale_dir_list(&gone, from, &bookmarks, &recent_dirs),
+                Some(from)
+            );
+        }
+
+        // Removing from one list leaves the other, which is then offered.
+        assert!(remove_saved_dir(
+            DirList::RecentDirs,
+            &gone,
+            &mut bookmarks,
+            &mut recent_dirs
+        ));
+        assert_eq!(recent_dirs.len(), 1);
+        assert_eq!(bookmarks.len(), 2);
+        assert_eq!(
+            stale_dir_list(&gone, DirList::RecentDirs, &bookmarks, &recent_dirs),
+            Some(DirList::Bookmarks)
+        );
+        assert!(!remove_saved_dir(
+            DirList::RecentDirs,
+            &gone,
+            &mut bookmarks,
+            &mut recent_dirs
+        ));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn cleanup_removes_only_missing_recent_dirs() {
+        let base = env::temp_dir().join(format!("shell_missing_recent_{}", std::process::id()));
+        let live = base.join("live");
+        fs::create_dir_all(&live).unwrap();
+
+        let paths = [base.join("gone_a"), live.clone(), base.join("gone_b")];
+        let mut recent_dirs: Vec<_> = paths
+            .iter()
+            .map(|p| RecentDir {
+                path: p.clone(),
+                dt: Utc::now(),
+            })
+            .collect();
+
+        assert_eq!(
+            remove_missing_recent_dirs(&mut recent_dirs),
+            [paths[0].clone(), paths[2].clone()]
+        );
+        assert_eq!(recent_dirs.len(), 1);
+        assert_eq!(recent_dirs[0].path, live);
+        assert!(remove_missing_recent_dirs(&mut recent_dirs).is_empty());
+
+        let _ = fs::remove_dir_all(&base);
     }
 }

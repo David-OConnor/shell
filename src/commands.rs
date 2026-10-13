@@ -17,16 +17,16 @@
 use std::{
     env,
     fs::File,
-    io,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
 };
 
 use crate::{
-    clone_root, expand_clone, find_bookmark, find_history_index, find_recent_dir, path_from_args,
-    quiet_command, record_clone_root, ssh,
+    DirList, clone_root, expand_clone, find_bookmark, find_history_index, find_recent_dir,
+    path_from_args, quiet_command, record_clone_root, remove_saved_dir, ssh, stale_dir_list,
     state::State,
+    util::{confirm, render_with_tilde},
 };
 
 /// Which stream a chunk of output came from. Frontends use this to colour
@@ -643,22 +643,16 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
             // `cd <number>` (with nothing else after) jumps to a recent
             // directory by its Ctrl+2 index. Anything else is resolved as a
             // normal path/bookmark argument.
-            // When the arg parses as a number, we treat it as a recent-dir
-            // index; remember the index so we can prune the entry if its
-            // path is stale (deleted/moved on disk).
-            let (target, recent_idx) = if let Ok(idx) = args.parse::<usize>() {
+            let target = if let Ok(idx) = args.parse::<usize>() {
                 let resolved = state
                     .recent_dirs
                     .lock()
                     .ok()
                     .and_then(|list| list.get(idx).map(|r| r.path.clone()));
-                match resolved {
-                    Some(p) => (Some(p), Some(idx)),
-                    None => {
-                        eprintln!("cd: no recent directory at index {idx}");
-                        (None, None)
-                    }
+                if resolved.is_none() {
+                    eprintln!("cd: no recent directory at index {idx}");
                 }
+                resolved
             } else {
                 let bookmarks = state.dir_bookmarks.lock();
                 let slice: &[PathBuf] = bookmarks.as_deref().map(|v| v.as_slice()).unwrap_or(&[]);
@@ -671,7 +665,7 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
                         }
                     }
                 }
-                (Some(target), None)
+                Some(target)
             };
 
             if let Some(target) = target {
@@ -679,27 +673,7 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
                     Ok(_) => state.cwd = env::current_dir().unwrap_or(target),
                     Err(e) => {
                         eprintln!("cd: {e}");
-
-                        // If the recent-dir entry's path no longer exists on
-                        // disk, prune it so the indices shift down and the
-                        // user doesn't hit the same stale row forever.
-                        if e.kind() == io::ErrorKind::NotFound
-                            && let Some(i) = recent_idx
-                        {
-                            let mut removed = false;
-                            if let Ok(mut list) = state.recent_dirs.lock()
-                                && list.get(i).map(|r| r.path == target).unwrap_or(false)
-                            {
-                                list.remove(i);
-                                removed = true;
-                            }
-                            if removed {
-                                eprintln!("cd: removed stale recent-dir entry {i}");
-                                if let Err(e) = state.save(state_path) {
-                                    eprintln!("warning: failed to save state: {e}");
-                                }
-                            }
-                        }
+                        offer_stale_dir_removal(state, state_path, &target, DirList::RecentDirs);
                     }
                 }
             }
@@ -721,7 +695,10 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
             match resolved {
                 Some(target) => match env::set_current_dir(&target) {
                     Ok(_) => state.cwd = env::current_dir().unwrap_or(target),
-                    Err(e) => eprintln!("bm: {e}"),
+                    Err(e) => {
+                        eprintln!("bm: {e}");
+                        offer_stale_dir_removal(state, state_path, &target, DirList::Bookmarks);
+                    }
                 },
                 None => eprintln!("bm: no matching bookmark for `{args}`"),
             }
@@ -746,6 +723,41 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
     }
 
     true
+}
+
+/// After a `cd` to `target` failed: if it no longer exists and is saved in
+/// recent dirs or bookmarks, ask on stdin whether to remove it from that
+/// list. `from` is the list it was picked from. The GUI asks the same
+/// question with a popup.
+fn offer_stale_dir_removal(state: &mut State, state_path: &Path, target: &Path, from: DirList) {
+    let list = match (state.dir_bookmarks.lock(), state.recent_dirs.lock()) {
+        (Ok(bookmarks), Ok(recent)) => stale_dir_list(target, from, &bookmarks, &recent),
+        _ => None,
+    };
+    let Some(list) = list else {
+        return;
+    };
+
+    let shown = render_with_tilde(target, state.home.as_deref());
+    if !confirm(&format!(
+        "{shown} doesn't exist. Remove it from {}?",
+        list.name()
+    )) {
+        return;
+    }
+
+    let removed = match (state.dir_bookmarks.lock(), state.recent_dirs.lock()) {
+        (Ok(mut bookmarks), Ok(mut recent)) => {
+            remove_saved_dir(list, target, &mut bookmarks, &mut recent)
+        }
+        _ => false,
+    };
+    if removed {
+        println!("Removed {shown} from {}", list.name());
+        if let Err(e) = state.save(state_path) {
+            eprintln!("warning: failed to save state: {e}");
+        }
+    }
 }
 
 /// Keep Ctrl+C aimed at launched child processes, not the shell itself.

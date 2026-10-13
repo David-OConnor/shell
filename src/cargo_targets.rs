@@ -12,12 +12,11 @@
 //! Deleting directly removes exactly what the user approved.
 
 use std::{
-    fs, io,
-    io::Write,
+    fs,
     path::{Path, PathBuf},
 };
 
-use crate::input_completion::is_hidden;
+use crate::{input_completion::is_hidden, util::confirm};
 
 /// Directories the scan never descends into: they won't hold a crate, and are
 /// large enough to slow the walk noticeably.
@@ -148,19 +147,6 @@ fn dir_size(dir: &Path) -> u64 {
         }
     }
     total
-}
-
-/// Ask a yes/no question on stdin. Only `y` or `yes` (any case) count as yes,
-/// so a stray Enter, or end of input, deletes nothing.
-fn confirm(question: &str) -> bool {
-    print!("{question} [y/N] ");
-    let _ = io::stdout().flush();
-
-    let mut answer = String::new();
-    if io::stdin().read_line(&mut answer).is_err() {
-        return false;
-    }
-    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
 fn plural(count: usize) -> &'static str {

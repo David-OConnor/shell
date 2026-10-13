@@ -20,11 +20,12 @@ pub use input_completion::{
 pub use python::{VENV_PREFIX, venv_python};
 pub use ssh::{RemoteSession, SshMode};
 pub use state::{
-    BrowserFile, DirLabelLens, FontSizes, HistoryItem, NavState, OpenTabs, PanelVis, PanelWidths, RecentDir,
+    BrowserFile, DirLabelLens, FilesPanelPrefs, FontSizes, HistoryItem, NavState, OpenTabs, PanelVis, PanelWidths, RecentDir,
     RemoteTerminal, WindowSize, dedup_history, record_clone_root, record_history, record_recent_dir,
 };
 pub use util::{
-    DISP_PAGE_LEN, DIVIDER, find_bookmark, find_history_index, find_recent_dir, get_home,
-    history_indices_in_dir, history_latest_indices, page_count, path_from_args, quiet_command,
-    read_browser_files, render_history, render_history_in_dir, render_page,
+    DISP_PAGE_LEN, DIVIDER, DirList, dir_missing, find_bookmark, find_history_index,
+    find_recent_dir, get_home, history_indices_in_dir, history_latest_indices, page_count,
+    path_from_args, quiet_command, read_browser_files, remove_missing_recent_dirs,
+    remove_saved_dir, render_history, render_history_in_dir, render_page, stale_dir_list,
 };
