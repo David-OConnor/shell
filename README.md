@@ -10,7 +10,7 @@ Compatible with Windows, Linux, and Mac. Windows users need to have Powershell 7
 This is not a shell scripting language like bash or powershell: It wraps the existing terminal you 
 launch it from. In this sense, it differs from `zsh`, `fish` etc: These are full scripting/execution systems, in addition to improved an improved UI. This program provides the latter only.
 
-For a GUI version which has correspondingly more features, see [shell-gui](https://github.com/David-OConnor/shell-gui).
+For a GUI version which has correspondingly more features, see [Peregrine](https://github.com/David-OConnor/peregrine).
 
 Highlights:
 

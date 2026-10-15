@@ -66,6 +66,15 @@ pub struct State {
     /// GUI Files-panel toggles. Held only to round-trip the `FILES_PANEL`
     /// line, like `font_size`.
     pub files_panel: FilesPanelPrefs,
+    /// GUI list / details dividers. Held only to round-trip the
+    /// `PANE_SPLIT` line, like `font_size`.
+    pub pane_splits: PaneSplits,
+    /// GUI Cmd history toggles. Held only to round-trip the `CMD_HISTORY`
+    /// line, like `font_size`.
+    pub cmd_history: CmdHistoryPrefs,
+    /// GUI clipboard history, newest first. Held only to round-trip the
+    /// `CLIP` lines, like `font_size`.
+    pub clipboard: Vec<ClipboardEntry>,
     /// Cached git branch for `cwd`. `None` when cwd isn't inside a repo.
     /// Refreshed by `refresh_branch` after every command and after `cd` —
     /// branch can change behind our back via `git checkout`, so we re-check
@@ -101,6 +110,9 @@ impl Default for State {
             dir_label_lens: DirLabelLens::default(),
             panel_widths: PanelWidths::default(),
             files_panel: FilesPanelPrefs::default(),
+            pane_splits: PaneSplits::default(),
+            cmd_history: CmdHistoryPrefs::default(),
+            clipboard: Vec::new(),
             branch,
             active_remote: None,
         }
@@ -219,6 +231,9 @@ impl State {
             self.dir_label_lens,
             self.panel_widths,
             self.files_panel,
+            self.pane_splits,
+            self.cmd_history,
+            &self.clipboard,
             path,
         )
     }
@@ -247,6 +262,9 @@ impl State {
             dir_label_lens: loaded.dir_label_lens,
             panel_widths: loaded.panel_widths,
             files_panel: loaded.files_panel,
+            pane_splits: loaded.pane_splits,
+            cmd_history: loaded.cmd_history,
+            clipboard: loaded.clipboard,
             branch,
             active_remote: None,
         })
@@ -302,8 +320,10 @@ pub struct PanelVis {
     pub recent_cmds_in_dir: bool,
     pub remote_terminals: bool,
     pub file_browser: bool,
-    /// The PATH editor (`shell_gui`'s PATH panel).
+    /// The PATH editor (`peregrine`'s PATH panel).
     pub path_editor: bool,
+    /// `peregrine`'s clipboard history panel.
+    pub clipboard: bool,
 }
 
 impl Default for PanelVis {
@@ -316,6 +336,7 @@ impl Default for PanelVis {
             remote_terminals: false,
             file_browser: true,
             path_editor: false,
+            clipboard: false,
         }
     }
 }
@@ -342,14 +363,18 @@ pub struct FontSizes {
 }
 
 /// GUI max displayed path lengths, in characters, for the Bookmarks and
-/// Recent dirs panels; longer paths are truncated from the front. `None` when
-/// the state file has no value for one, in which case the GUI uses its
-/// default. Like [FontSizes], the CLI never reads these — they live here only
-/// so a CLI-side save round-trips the GUI's values.
+/// Recent dirs panels; longer paths are truncated from the front. Also whether
+/// each panel shows just the final directory name (`bookmark_names`,
+/// `recent_dir_names`) rather than the path. `None` when the state file has
+/// no value for one, in which case the GUI uses its default. Like
+/// [FontSizes], the CLI never reads these — they live here only so a
+/// CLI-side save round-trips the GUI's values.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct DirLabelLens {
     pub bookmarks: Option<usize>,
     pub recent_dirs: Option<usize>,
+    pub bookmark_names: Option<bool>,
+    pub recent_dir_names: Option<bool>,
 }
 
 /// GUI side-panel widths, in logical points, as the user last dragged them.
@@ -382,6 +407,45 @@ pub struct FilesPanelPrefs {
     pub deep_search_names: Option<bool>,
 }
 
+/// Where the GUI's list / details dividers were last dragged to, each as
+/// the fraction of its pane's height the details below take: the Files
+/// panel's (`files`) and the PATH window's (`path`). `None` when the state
+/// file has no value for one, in which case the GUI uses its default. Like
+/// [PanelWidths], the CLI never reads these — they live here only so a
+/// CLI-side save round-trips the GUI's values.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PaneSplits {
+    pub files: Option<f32>,
+    pub path: Option<f32>,
+}
+
+/// GUI Cmd history panel toggles, as the user last left them: whether each
+/// row shows the "In <dir>" button under the command (`show_dir`). `None`
+/// when the state file has no value for one, in which case the GUI uses its
+/// default. Like [PanelWidths], the CLI never reads these — they live here
+/// only so a CLI-side save round-trips the GUI's values.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CmdHistoryPrefs {
+    pub show_dir: Option<bool>,
+}
+
+/// One entry in the GUI's clipboard history (`peregrine`'s Clipboard panel):
+/// what was copied, and when it was last put on the clipboard. Like
+/// [PanelWidths], the CLI never reads these — they live here only so a
+/// CLI-side save round-trips the GUI's history.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClipboardEntry {
+    pub content: ClipboardContent,
+    pub added: DateTime<Utc>,
+}
+
+/// One copy operation. A group of files remains a single history entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClipboardContent {
+    Text(String),
+    Files { paths: Vec<PathBuf>, cut: bool },
+}
+
 /// GUI tab layout persisted across runs: the working directory of each open
 /// tab (in tab order) plus the index of the one that was active. Persisted so
 /// reopening the GUI restores the same set of tabs the user left open. Like
@@ -412,7 +476,7 @@ pub struct NavState {
     pub his_cursor: Option<usize>,
     pub cd_cursor: Option<usize>,
     /// In-progress input snapshot, managed through `step_his`/`step_cd` and
-    /// `reset`. Public because `shell_gui` constructs `NavState` with a struct
+    /// `reset`. Public because `Peregrine` constructs `NavState` with a struct
     /// literal (`..NavState::new()`), which requires every field be visible.
     pub draft: String,
     pub draft_set: bool,

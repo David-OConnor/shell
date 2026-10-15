@@ -20,7 +20,7 @@ use rustyline::{
     validate::Validator,
 };
 use shell::{
-    DISP_PAGE_LEN, DirLabelLens, FilesPanelPrefs, FontSizes, NavState, OpenTabs, PanelVis,
+    ClipboardEntry, CmdHistoryPrefs, DISP_PAGE_LEN, DirLabelLens, FilesPanelPrefs, FontSizes, NavState, OpenTabs, PaneSplits, PanelVis,
     PanelWidths, RemoteTerminal, WindowSize, commands, complete_cd_path, complete_clone_url,
     complete_command_path, page_count, save_data,
     state::{HistoryItem, RecentDir},
@@ -415,6 +415,15 @@ struct BookmarkHandler {
     /// Snapshot of the GUI's Files-panel toggles, written back unchanged for
     /// the same reason as `panel_vis`.
     files_panel: FilesPanelPrefs,
+    /// Snapshot of the GUI's list / details dividers, written back
+    /// unchanged for the same reason as `panel_vis`.
+    pane_splits: PaneSplits,
+    /// Snapshot of the GUI's Cmd history toggles, written back unchanged for
+    /// the same reason as `panel_vis`.
+    cmd_history: CmdHistoryPrefs,
+    /// Snapshot of the GUI's clipboard history, written back unchanged for
+    /// the same reason as `panel_vis`.
+    clipboard: Vec<ClipboardEntry>,
     save_path: PathBuf,
     printer: SharedPrinter,
     /// Shared recall state. After adding a bookmark we stash the current input
@@ -462,6 +471,9 @@ impl ConditionalEventHandler for BookmarkHandler {
                         self.dir_label_lens,
                         self.panel_widths,
                         self.files_panel,
+                        self.pane_splits,
+                        self.cmd_history,
+                        &self.clipboard,
                         &self.save_path,
                     )
                 {
@@ -720,6 +732,9 @@ fn main() {
             dir_label_lens: state.dir_label_lens,
             panel_widths: state.panel_widths,
             files_panel: state.files_panel,
+            pane_splits: state.pane_splits,
+            cmd_history: state.cmd_history,
+            clipboard: state.clipboard.clone(),
             save_path: state_path.clone(),
             printer: printer.clone(),
         })),

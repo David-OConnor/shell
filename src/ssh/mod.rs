@@ -9,7 +9,7 @@
 //! in PTY mode, our channel reader task — keep making progress between our
 //! `block_on` calls (important for live PTY output streaming into the GUI).
 //!
-//! Two interaction modes, each in its own submodule, both reused by `shell_gui`:
+//! Two interaction modes, each in its own submodule, both reused by `peregrine`:
 //!   * [`exec`] — one channel per command, output captured in a batch. The
 //!     default; fits the existing output-pane model.
 //!   * [`interactive`] — a single persistent PTY + shell channel, bytes streamed

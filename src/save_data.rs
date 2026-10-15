@@ -8,6 +8,10 @@
 //! Newlines in the command text are flattened to spaces on save so each
 //! entry stays on one line.
 //!
+//! CLIP (the GUI's clipboard history) also uses TAB separators, but its
+//! fields are escaped rather than flattened (see [escape_field]), so copied
+//! text comes back with its newlines and tabs intact.
+//!
 //! Timestamps are written as second-precision RFC 3339 (e.g.
 //! `2026-06-23T13:41:32Z`) to keep rows compact.
 //!
@@ -25,7 +29,8 @@ use std::{
 use chrono::{DateTime, SecondsFormat, Utc};
 
 use crate::state::{
-    DirLabelLens, FilesPanelPrefs, FontSizes, HistoryItem, OpenTabs, PanelVis, PanelWidths,
+    ClipboardContent, ClipboardEntry, CmdHistoryPrefs, DirLabelLens, FilesPanelPrefs, FontSizes, HistoryItem, OpenTabs, PaneSplits, PanelVis,
+    PanelWidths,
     RecentDir, RemoteTerminal, WindowSize,
 };
 
@@ -43,7 +48,10 @@ const FONT_SIZE_TAG: &str = "FONT_SIZE ";
 const DIR_LABEL_LEN_TAG: &str = "DIR_LABEL_LEN ";
 const PANEL_WIDTH_TAG: &str = "PANEL_WIDTH ";
 const FILES_PANEL_TAG: &str = "FILES_PANEL ";
+const PANE_SPLIT_TAG: &str = "PANE_SPLIT ";
+const CMD_HISTORY_TAG: &str = "CMD_HISTORY ";
 const CLONE_ROOT_TAG: &str = "CLONE_ROOT ";
+const CLIPBOARD_TAG: &str = "CLIP ";
 
 /// Bundle of everything `load_state` returns. Lets callers destructure
 /// in one step and lets us grow the format without churning every call
@@ -79,6 +87,15 @@ pub struct LoadedState {
     /// GUI Files-panel toggles. Each is `None` when the `FILES_PANEL` line
     /// lacks it, as with `font_size`.
     pub files_panel: FilesPanelPrefs,
+    /// GUI list / details dividers. Each is `None` when the `PANE_SPLIT`
+    /// line lacks it, as with `font_size`.
+    pub pane_splits: PaneSplits,
+    /// GUI Cmd history toggles. Each is `None` when the `CMD_HISTORY` line
+    /// lacks it, as with `font_size`.
+    pub cmd_history: CmdHistoryPrefs,
+    /// The GUI's clipboard history, newest first. Empty when the file has
+    /// no `CLIP` lines.
+    pub clipboard: Vec<ClipboardEntry>,
 }
 
 /// Where the state file lives by default: `<home>/shell_state.ss`. Falls back
@@ -104,6 +121,9 @@ pub fn save_state(
     dir_label_lens: DirLabelLens,
     panel_widths: PanelWidths,
     files_panel: FilesPanelPrefs,
+    pane_splits: PaneSplits,
+    cmd_history: CmdHistoryPrefs,
+    clipboard: &[ClipboardEntry],
     path: &Path,
 ) -> io::Result<()> {
     if let Some(parent) = path.parent()
@@ -112,7 +132,8 @@ pub fn save_state(
         fs::create_dir_all(parent)?;
     }
 
-    let mut f = fs::File::create(path)?;
+    // Buffered: the GUI saves on every copy, and clipboard entries can be big.
+    let mut f = io::BufWriter::new(fs::File::create(path)?);
     writeln!(
         f,
         "# Shell state — auto-generated. Do not edit while shell is running."
@@ -148,7 +169,7 @@ pub fn save_state(
     // are skipped on load; missing keys keep their default value.
     writeln!(
         f,
-        "{PANEL_VIS_TAG}bookmarks={} recent_dirs={} recent_cmds={} recent_cmds_in_dir={} remote_terminals={} file_browser={} path_editor={}",
+        "{PANEL_VIS_TAG}bookmarks={} recent_dirs={} recent_cmds={} recent_cmds_in_dir={} remote_terminals={} file_browser={} path_editor={} clipboard={}",
         bool_to_int(panel_vis.bookmarks),
         bool_to_int(panel_vis.recent_dirs),
         bool_to_int(panel_vis.recent_cmds),
@@ -156,6 +177,7 @@ pub fn save_state(
         bool_to_int(panel_vis.remote_terminals),
         bool_to_int(panel_vis.file_browser),
         bool_to_int(panel_vis.path_editor),
+        bool_to_int(panel_vis.clipboard),
     )?;
 
     // GUI-only. Written only when present so a CLI-side save
@@ -187,17 +209,23 @@ pub fn save_state(
         writeln!(f, "{}", pairs.join(" "))?;
     }
 
-    // DirLabelLen: GUI-only, written only when present, like FONT_SIZE.
-    if dir_label_lens.bookmarks.is_some() || dir_label_lens.recent_dirs.is_some() {
-        write!(f, "{DIR_LABEL_LEN_TAG}")?;
-        let mut pairs = Vec::new();
-        if let Some(len) = dir_label_lens.bookmarks {
-            pairs.push(format!("bookmarks={len}"));
-        }
-        if let Some(len) = dir_label_lens.recent_dirs {
-            pairs.push(format!("recent_dirs={len}"));
-        }
-        writeln!(f, "{}", pairs.join(" "))?;
+    // DirLabelLen: GUI-only, written only when present, like FONT_SIZE. The
+    // names-only toggles are `key=0|1` pairs, like PANEL_VIS.
+    let mut pairs = Vec::new();
+    if let Some(len) = dir_label_lens.bookmarks {
+        pairs.push(format!("bookmarks={len}"));
+    }
+    if let Some(len) = dir_label_lens.recent_dirs {
+        pairs.push(format!("recent_dirs={len}"));
+    }
+    if let Some(on) = dir_label_lens.bookmark_names {
+        pairs.push(format!("bookmark_names={}", bool_to_int(on)));
+    }
+    if let Some(on) = dir_label_lens.recent_dir_names {
+        pairs.push(format!("recent_dir_names={}", bool_to_int(on)));
+    }
+    if !pairs.is_empty() {
+        writeln!(f, "{DIR_LABEL_LEN_TAG}{}", pairs.join(" "))?;
     }
 
     // PanelWidth: GUI-only, written only when present, like FONT_SIZE. Keys
@@ -234,6 +262,23 @@ pub fn save_state(
         writeln!(f, "{FILES_PANEL_TAG}{}", pairs.join(" "))?;
     }
 
+    // PaneSplit: GUI-only, written only when present, like FONT_SIZE.
+    // `key=<fraction>` pairs, like PANEL_WIDTH.
+    let splits = [("files", pane_splits.files), ("path", pane_splits.path)];
+    let pairs: Vec<String> = splits
+        .iter()
+        .filter_map(|(k, s)| s.map(|s| format!("{k}={s}")))
+        .collect();
+    if !pairs.is_empty() {
+        writeln!(f, "{PANE_SPLIT_TAG}{}", pairs.join(" "))?;
+    }
+
+    // CmdHistory: GUI-only, written only when present, like FONT_SIZE.
+    // `key=0|1` pairs, like PANEL_VIS.
+    if let Some(on) = cmd_history.show_dir {
+        writeln!(f, "{CMD_HISTORY_TAG}show_dir={}", bool_to_int(on))?;
+    }
+
     for rt in remote_terminals {
         // Only non-secret connection details go on disk; the password lives in
         // the OS keyring (see `crate::secrets`). Format is host\tport\tusername.
@@ -250,12 +295,67 @@ pub fn save_state(
         writeln!(f, "{CLONE_ROOT_TAG}{}", sanitize_field(root))?;
     }
 
-    Ok(())
+    // Clipboard: GUI-only, newest first. Last, since entries can be long.
+    // `<dt>\ttext\t<text>` or `<dt>\tcopy|cut\t<path>\t<path>...`.
+    for entry in clipboard {
+        let dt = entry.added.to_rfc3339_opts(SecondsFormat::Secs, true);
+        match &entry.content {
+            ClipboardContent::Text(text) => {
+                writeln!(f, "{CLIPBOARD_TAG}{dt}\ttext\t{}", escape_field(text))?;
+            }
+            ClipboardContent::Files { paths, cut } => {
+                let kind = if *cut { "cut" } else { "copy" };
+                let paths: Vec<String> = paths
+                    .iter()
+                    .map(|p| escape_field(&p.to_string_lossy()))
+                    .collect();
+                writeln!(f, "{CLIPBOARD_TAG}{dt}\t{kind}\t{}", paths.join("\t"))?;
+            }
+        }
+    }
+
+    f.flush()
 }
 
 /// Flatten characters that would break the line/tab-based record format.
 fn sanitize_field(s: &str) -> String {
     s.replace(['\r', '\n', '\t'], " ")
+}
+
+/// Escape the characters that would break the line/tab-based record format,
+/// for fields that must come back exactly: `\` `\t` `\n` `\r` become `\\`
+/// `\t` `\n` `\r`. Undone by [unescape_field].
+fn escape_field(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn unescape_field(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('t') => out.push('\t'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some(c) => out.push(c),
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 fn bool_to_int(b: bool) -> u8 {
@@ -281,6 +381,9 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
                 dir_label_lens: DirLabelLens::default(),
                 panel_widths: PanelWidths::default(),
                 files_panel: FilesPanelPrefs::default(),
+                pane_splits: PaneSplits::default(),
+                cmd_history: CmdHistoryPrefs::default(),
+                clipboard: Vec::new(),
             });
         }
         Err(e) => return Err(e),
@@ -298,6 +401,9 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
     let mut dir_label_lens = DirLabelLens::default();
     let mut panel_widths = PanelWidths::default();
     let mut files_panel = FilesPanelPrefs::default();
+    let mut pane_splits = PaneSplits::default();
+    let mut cmd_history = CmdHistoryPrefs::default();
+    let mut clipboard = Vec::new();
 
     for line in BufReader::new(file).lines() {
         let line = line?;
@@ -365,6 +471,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
                     "remote_terminals" => panel_vis.remote_terminals = on,
                     "file_browser" => panel_vis.file_browser = on,
                     "path_editor" => panel_vis.path_editor = on,
+                    "clipboard" => panel_vis.clipboard = on,
                     _ => {}
                 }
             }
@@ -431,21 +538,20 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix(DIR_LABEL_LEN_TAG) {
-            // Parse `bookmarks=<chars> recent_dirs=<chars>`. A malformed or
-            // zero value leaves that length at `None` (the GUI's default).
+            // Parse `bookmarks=<chars> recent_dirs=<chars>
+            // bookmark_names=0|1 recent_dir_names=0|1`. A malformed or zero
+            // length leaves it at `None` (the GUI's default).
             for pair in rest.split_whitespace() {
                 let Some((k, v)) = pair.split_once('=') else {
                     continue;
                 };
-                let Ok(len) = v.parse::<usize>() else {
-                    continue;
-                };
-                if len == 0 {
-                    continue;
-                }
+                let on = Some(v == "1" || v.eq_ignore_ascii_case("true"));
+                let len = v.parse::<usize>().ok().filter(|&len| len > 0);
                 match k {
-                    "bookmarks" => dir_label_lens.bookmarks = Some(len),
-                    "recent_dirs" => dir_label_lens.recent_dirs = Some(len),
+                    "bookmarks" if len.is_some() => dir_label_lens.bookmarks = len,
+                    "recent_dirs" if len.is_some() => dir_label_lens.recent_dirs = len,
+                    "bookmark_names" => dir_label_lens.bookmark_names = on,
+                    "recent_dir_names" => dir_label_lens.recent_dir_names = on,
                     _ => {}
                 }
             }
@@ -497,6 +603,41 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
             }
             continue;
         }
+        if let Some(rest) = trimmed.strip_prefix(PANE_SPLIT_TAG) {
+            // Parse `files=<fraction> path=<fraction>`. Only adopt values
+            // strictly between 0 and 1; anything else leaves that divider at
+            // `None` (the GUI's default).
+            for pair in rest.split_whitespace() {
+                let Some((k, v)) = pair.split_once('=') else {
+                    continue;
+                };
+                let Ok(s) = v.parse::<f32>() else {
+                    continue;
+                };
+                if !(s > 0.0 && s < 1.0) {
+                    continue;
+                }
+                match k {
+                    "files" => pane_splits.files = Some(s),
+                    "path" => pane_splits.path = Some(s),
+                    _ => {}
+                }
+            }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix(CMD_HISTORY_TAG) {
+            // Parse `show_dir=0|1`, like FILES_PANEL.
+            for pair in rest.split_whitespace() {
+                let Some((k, v)) = pair.split_once('=') else {
+                    continue;
+                };
+                let on = Some(v == "1" || v.eq_ignore_ascii_case("true"));
+                if k == "show_dir" {
+                    cmd_history.show_dir = on;
+                }
+            }
+            continue;
+        }
         if let Some(rest) = trimmed.strip_prefix(REMOTE_TERMINAL_TAG) {
             let rest = rest.trim_end_matches('\r');
 
@@ -520,6 +661,35 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
             }
             continue;
         }
+        if let Some(rest) = trimmed.strip_prefix(CLIPBOARD_TAG) {
+            // `<dt>\ttext\t<text>` or `<dt>\tcopy|cut\t<path>...`, each field
+            // escaped. A malformed line, or a file entry without paths, is
+            // skipped.
+            let mut parts = rest.trim_end_matches('\r').split('\t');
+            if let (Some(dt_str), Some(kind)) = (parts.next(), parts.next())
+                && let Ok(dt) = DateTime::parse_from_rfc3339(dt_str)
+            {
+                let content = match kind {
+                    "text" => parts.next().map(|t| ClipboardContent::Text(unescape_field(t))),
+                    "copy" | "cut" => {
+                        let paths: Vec<PathBuf> =
+                            parts.map(|p| PathBuf::from(unescape_field(p))).collect();
+                        (!paths.is_empty()).then_some(ClipboardContent::Files {
+                            paths,
+                            cut: kind == "cut",
+                        })
+                    }
+                    _ => None,
+                };
+                if let Some(content) = content {
+                    clipboard.push(ClipboardEntry {
+                        content,
+                        added: dt.with_timezone(&Utc),
+                    });
+                }
+            }
+            continue;
+        }
         // Unknown tags are ignored on purpose for forward compatibility.
     }
     crate::state::dedup_history(&mut history);
@@ -537,6 +707,9 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
         dir_label_lens,
         panel_widths,
         files_panel,
+        pane_splits,
+        cmd_history,
+        clipboard,
     })
 }
 
@@ -564,6 +737,9 @@ mod tests {
             DirLabelLens::default(),
             PanelWidths::default(),
             FilesPanelPrefs::default(),
+            PaneSplits::default(),
+            CmdHistoryPrefs::default(),
+            &[],
             &path,
         )
         .unwrap();
@@ -599,6 +775,9 @@ mod tests {
                 DirLabelLens::default(),
                 PanelWidths::default(),
                 FilesPanelPrefs::default(),
+                PaneSplits::default(),
+                CmdHistoryPrefs::default(),
+                &[],
                 &path,
             )
             .unwrap();
@@ -614,11 +793,17 @@ mod tests {
             DirLabelLens::default(),
             DirLabelLens {
                 bookmarks: Some(30),
-                recent_dirs: None,
+                ..Default::default()
+            },
+            DirLabelLens {
+                recent_dir_names: Some(false),
+                ..Default::default()
             },
             DirLabelLens {
                 bookmarks: Some(30),
                 recent_dirs: Some(45),
+                bookmark_names: Some(true),
+                recent_dir_names: Some(false),
             },
         ] {
             save_state(
@@ -634,6 +819,9 @@ mod tests {
                 lens,
                 PanelWidths::default(),
                 FilesPanelPrefs::default(),
+                PaneSplits::default(),
+                CmdHistoryPrefs::default(),
+                &[],
                 &path,
             )
             .unwrap();
@@ -674,6 +862,9 @@ mod tests {
                 DirLabelLens::default(),
                 widths,
                 FilesPanelPrefs::default(),
+                PaneSplits::default(),
+                CmdHistoryPrefs::default(),
+                &[],
                 &path,
             )
             .unwrap();
@@ -710,11 +901,149 @@ mod tests {
                 DirLabelLens::default(),
                 PanelWidths::default(),
                 prefs,
+                PaneSplits::default(),
+                CmdHistoryPrefs::default(),
+                &[],
                 &path,
             )
             .unwrap();
             assert_eq!(load_state(&path).unwrap().files_panel, prefs);
         }
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn pane_splits_round_trip() {
+        let path = std::env::temp_dir().join("shell_save_data_test_pane_splits.ss");
+        for splits in [
+            PaneSplits::default(),
+            PaneSplits {
+                files: Some(0.25),
+                ..Default::default()
+            },
+            PaneSplits {
+                files: Some(0.5),
+                path: Some(0.125),
+            },
+        ] {
+            save_state(
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &PanelVis::default(),
+                None,
+                &OpenTabs::default(),
+                FontSizes::default(),
+                DirLabelLens::default(),
+                PanelWidths::default(),
+                FilesPanelPrefs::default(),
+                splits,
+                CmdHistoryPrefs::default(),
+                &[],
+                &path,
+            )
+            .unwrap();
+            assert_eq!(load_state(&path).unwrap().pane_splits, splits);
+        }
+
+        // Out-of-range fractions are dropped rather than adopted.
+        fs::write(&path, "PANE_SPLIT files=1.5 path=0 junk\n").unwrap();
+        assert_eq!(load_state(&path).unwrap().pane_splits, PaneSplits::default());
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn cmd_history_round_trip() {
+        let path = std::env::temp_dir().join("shell_save_data_test_cmd_history.ss");
+        for prefs in [
+            CmdHistoryPrefs::default(),
+            CmdHistoryPrefs {
+                show_dir: Some(false),
+            },
+            CmdHistoryPrefs {
+                show_dir: Some(true),
+            },
+        ] {
+            save_state(
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &PanelVis::default(),
+                None,
+                &OpenTabs::default(),
+                FontSizes::default(),
+                DirLabelLens::default(),
+                PanelWidths::default(),
+                FilesPanelPrefs::default(),
+                PaneSplits::default(),
+                prefs,
+                &[],
+                &path,
+            )
+            .unwrap();
+            assert_eq!(load_state(&path).unwrap().cmd_history, prefs);
+        }
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn clipboard_round_trip() {
+        let path = std::env::temp_dir().join("shell_save_data_test_clipboard.ss");
+        let at = |s| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        let entries = vec![
+            ClipboardEntry {
+                content: ClipboardContent::Text(
+                    "line 1\r\nline\t2\\n not a newline\n  trailing \\".into(),
+                ),
+                added: at("2026-10-15T09:30:00Z"),
+            },
+            ClipboardEntry {
+                content: ClipboardContent::Files {
+                    paths: vec![PathBuf::from(r"C:\Users\a b\x.txt"), PathBuf::from("/tmp/y")],
+                    cut: true,
+                },
+                added: at("2026-10-14T23:59:59Z"),
+            },
+            ClipboardEntry {
+                content: ClipboardContent::Files {
+                    paths: vec![PathBuf::from("z")],
+                    cut: false,
+                },
+                added: at("2026-10-01T00:00:00Z"),
+            },
+        ];
+        save_state(
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &PanelVis::default(),
+            None,
+            &OpenTabs::default(),
+            FontSizes::default(),
+            DirLabelLens::default(),
+            PanelWidths::default(),
+            FilesPanelPrefs::default(),
+            PaneSplits::default(),
+            CmdHistoryPrefs::default(),
+            &entries,
+            &path,
+        )
+        .unwrap();
+        assert_eq!(load_state(&path).unwrap().clipboard, entries);
+
+        // Malformed lines are skipped rather than failing the load.
+        fs::write(
+            &path,
+            "CLIP junk\ttext\tx\nCLIP 2026-10-15T09:30:00Z\tcopy\nCLIP 2026-10-15T09:30:00Z\tother\tx\n",
+        )
+        .unwrap();
+        assert!(load_state(&path).unwrap().clipboard.is_empty());
         let _ = fs::remove_file(&path);
     }
 }

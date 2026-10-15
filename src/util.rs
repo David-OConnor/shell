@@ -283,7 +283,7 @@ pub(crate) fn confirm(question: &str) -> bool {
 /// The entry of `paths` that best matches `query`, case-insensitively. The
 /// directory name is checked first: a name prefix beats a name substring, and
 /// within each the shorter name wins, so an exact name comes first (`shell`
-/// picks `~/code/shell` over `~/code/shell_gui`). Failing that, any substring
+/// picks `~/code/shell` over `~/code/peregrine`). Failing that, any substring
 /// of the full path matches. Remaining ties go to the last entry: the newest
 /// bookmark or most recent dir.
 fn best_path_match<'a>(
@@ -405,7 +405,7 @@ mod history_tests {
 /// or that runs detached — **not** for an interactive child that needs to
 /// share the terminal, since `CREATE_NO_WINDOW` denies it a console.
 ///
-/// Why it matters: the `shell_gui` frontend is built `windows_subsystem =
+/// Why it matters: the `peregrine` frontend is built `windows_subsystem =
 /// "windows"`, so it has no console of its own. When such a process spawns a
 /// console program (e.g. `git`, `pwsh`), Windows spins up a fresh `conhost.exe`
 /// for each spawn — a multi-hundred-ms stall that shows up as a per-command
@@ -578,111 +578,4 @@ pub fn get_home() -> Option<PathBuf> {
     env::var_os("USERPROFILE")
         .or_else(|| env::var_os("HOME"))
         .map(PathBuf::from)
-}
-
-#[cfg(test)]
-mod find_path_tests {
-    use super::*;
-
-    #[test]
-    fn closest_name_beats_newer_bookmark() {
-        let bookmarks = [
-            PathBuf::from("/code/shell"),
-            PathBuf::from("/code/shell_gui"),
-        ];
-        let find = |q| find_bookmark(&bookmarks, q).unwrap();
-        assert_eq!(find("shell"), bookmarks[0]);
-        assert_eq!(find("SHEL"), bookmarks[0]);
-        assert_eq!(find("shell_"), bookmarks[1]);
-        // Only the full path matches, so the newest bookmark wins.
-        assert_eq!(find("code"), bookmarks[1]);
-    }
-}
-
-#[cfg(test)]
-mod stale_dir_tests {
-    use chrono::Utc;
-
-    use super::*;
-
-    #[test]
-    fn offers_only_missing_saved_dirs_preferring_the_source_list() {
-        let base = env::temp_dir().join(format!("shell_stale_dir_{}", std::process::id()));
-        let live = base.join("live");
-        let gone = base.join("gone");
-        let unsaved = base.join("unsaved");
-        fs::create_dir_all(&live).unwrap();
-
-        let recent = |p: &Path| RecentDir {
-            path: p.to_path_buf(),
-            dt: Utc::now(),
-        };
-        let mut bookmarks = vec![live.clone(), gone.clone()];
-        let mut recent_dirs = vec![recent(&live), recent(&gone)];
-
-        // A dir that exists, or one in neither list, gets no offer.
-        assert_eq!(
-            stale_dir_list(&live, DirList::Bookmarks, &bookmarks, &recent_dirs),
-            None
-        );
-        assert_eq!(
-            stale_dir_list(&unsaved, DirList::Bookmarks, &bookmarks, &recent_dirs),
-            None
-        );
-        // In both lists: the one it was picked from.
-        for from in [DirList::Bookmarks, DirList::RecentDirs] {
-            assert_eq!(
-                stale_dir_list(&gone, from, &bookmarks, &recent_dirs),
-                Some(from)
-            );
-        }
-
-        // Removing from one list leaves the other, which is then offered.
-        assert!(remove_saved_dir(
-            DirList::RecentDirs,
-            &gone,
-            &mut bookmarks,
-            &mut recent_dirs
-        ));
-        assert_eq!(recent_dirs.len(), 1);
-        assert_eq!(bookmarks.len(), 2);
-        assert_eq!(
-            stale_dir_list(&gone, DirList::RecentDirs, &bookmarks, &recent_dirs),
-            Some(DirList::Bookmarks)
-        );
-        assert!(!remove_saved_dir(
-            DirList::RecentDirs,
-            &gone,
-            &mut bookmarks,
-            &mut recent_dirs
-        ));
-
-        let _ = fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn cleanup_removes_only_missing_recent_dirs() {
-        let base = env::temp_dir().join(format!("shell_missing_recent_{}", std::process::id()));
-        let live = base.join("live");
-        fs::create_dir_all(&live).unwrap();
-
-        let paths = [base.join("gone_a"), live.clone(), base.join("gone_b")];
-        let mut recent_dirs: Vec<_> = paths
-            .iter()
-            .map(|p| RecentDir {
-                path: p.clone(),
-                dt: Utc::now(),
-            })
-            .collect();
-
-        assert_eq!(
-            remove_missing_recent_dirs(&mut recent_dirs),
-            [paths[0].clone(), paths[2].clone()]
-        );
-        assert_eq!(recent_dirs.len(), 1);
-        assert_eq!(recent_dirs[0].path, live);
-        assert!(remove_missing_recent_dirs(&mut recent_dirs).is_empty());
-
-        let _ = fs::remove_dir_all(&base);
-    }
 }

@@ -3,7 +3,7 @@
 //! overrides in some cases, like directory navigation, and custom commands.
 //!
 //! `sync` (git add/commit/push) and `logs` (journalctl tail) are built-ins
-//! that both the CLI (`shell`) and the GUI (`shell_gui`) need to run. The
+//! that both the CLI (`shell`) and the GUI (Peregrine) need to run. The
 //! tricky part is that the two frontends route output differently: the CLI
 //! prints to stdout/stderr, the GUI pushes lines into its terminal pane.
 //!
