@@ -72,6 +72,9 @@ pub struct State {
     /// GUI Cmd history toggles. Held only to round-trip the `CMD_HISTORY`
     /// line, like `font_size`.
     pub cmd_history: CmdHistoryPrefs,
+    /// GUI appearance. Held only to round-trip the `APPEARANCE` line, like
+    /// `font_size`.
+    pub appearance: Appearance,
     /// GUI clipboard history, newest first. Held only to round-trip the
     /// `CLIP` lines, like `font_size`.
     pub clipboard: Vec<ClipboardEntry>,
@@ -112,6 +115,7 @@ impl Default for State {
             files_panel: FilesPanelPrefs::default(),
             pane_splits: PaneSplits::default(),
             cmd_history: CmdHistoryPrefs::default(),
+            appearance: Appearance::default(),
             clipboard: Vec::new(),
             branch,
             active_remote: None,
@@ -233,6 +237,7 @@ impl State {
             self.files_panel,
             self.pane_splits,
             self.cmd_history,
+            self.appearance,
             &self.clipboard,
             path,
         )
@@ -264,6 +269,7 @@ impl State {
             files_panel: loaded.files_panel,
             pane_splits: loaded.pane_splits,
             cmd_history: loaded.cmd_history,
+            appearance: loaded.appearance,
             clipboard: loaded.clipboard,
             branch,
             active_remote: None,
@@ -427,6 +433,15 @@ pub struct PaneSplits {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CmdHistoryPrefs {
     pub show_dir: Option<bool>,
+}
+
+/// GUI appearance, as the user last left it: whether the window is dark
+/// (`dark_mode`). `None` when the state file has no value, in which case the
+/// GUI follows the OS theme. Like [PanelWidths], the CLI never reads this — it
+/// lives here only so a CLI-side save round-trips the GUI's value.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Appearance {
+    pub dark_mode: Option<bool>,
 }
 
 /// One entry in the GUI's clipboard history (`peregrine`'s Clipboard panel):

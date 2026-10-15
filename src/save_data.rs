@@ -29,7 +29,7 @@ use std::{
 use chrono::{DateTime, SecondsFormat, Utc};
 
 use crate::state::{
-    ClipboardContent, ClipboardEntry, CmdHistoryPrefs, DirLabelLens, FilesPanelPrefs, FontSizes, HistoryItem, OpenTabs, PaneSplits, PanelVis,
+    Appearance, ClipboardContent, ClipboardEntry, CmdHistoryPrefs, DirLabelLens, FilesPanelPrefs, FontSizes, HistoryItem, OpenTabs, PaneSplits, PanelVis,
     PanelWidths,
     RecentDir, RemoteTerminal, WindowSize,
 };
@@ -50,6 +50,7 @@ const PANEL_WIDTH_TAG: &str = "PANEL_WIDTH ";
 const FILES_PANEL_TAG: &str = "FILES_PANEL ";
 const PANE_SPLIT_TAG: &str = "PANE_SPLIT ";
 const CMD_HISTORY_TAG: &str = "CMD_HISTORY ";
+const APPEARANCE_TAG: &str = "APPEARANCE ";
 const CLONE_ROOT_TAG: &str = "CLONE_ROOT ";
 const CLIPBOARD_TAG: &str = "CLIP ";
 
@@ -93,6 +94,9 @@ pub struct LoadedState {
     /// GUI Cmd history toggles. Each is `None` when the `CMD_HISTORY` line
     /// lacks it, as with `font_size`.
     pub cmd_history: CmdHistoryPrefs,
+    /// GUI appearance. `dark_mode` is `None` when the `APPEARANCE` line lacks
+    /// it, as with `font_size`; the GUI then follows the OS theme.
+    pub appearance: Appearance,
     /// The GUI's clipboard history, newest first. Empty when the file has
     /// no `CLIP` lines.
     pub clipboard: Vec<ClipboardEntry>,
@@ -123,6 +127,7 @@ pub fn save_state(
     files_panel: FilesPanelPrefs,
     pane_splits: PaneSplits,
     cmd_history: CmdHistoryPrefs,
+    appearance: Appearance,
     clipboard: &[ClipboardEntry],
     path: &Path,
 ) -> io::Result<()> {
@@ -279,6 +284,12 @@ pub fn save_state(
         writeln!(f, "{CMD_HISTORY_TAG}show_dir={}", bool_to_int(on))?;
     }
 
+    // Appearance: GUI-only, written only when present, like FONT_SIZE.
+    // `key=0|1` pairs, like PANEL_VIS.
+    if let Some(on) = appearance.dark_mode {
+        writeln!(f, "{APPEARANCE_TAG}dark_mode={}", bool_to_int(on))?;
+    }
+
     for rt in remote_terminals {
         // Only non-secret connection details go on disk; the password lives in
         // the OS keyring (see `crate::secrets`). Format is host\tport\tusername.
@@ -383,6 +394,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
                 files_panel: FilesPanelPrefs::default(),
                 pane_splits: PaneSplits::default(),
                 cmd_history: CmdHistoryPrefs::default(),
+                appearance: Appearance::default(),
                 clipboard: Vec::new(),
             });
         }
@@ -403,6 +415,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
     let mut files_panel = FilesPanelPrefs::default();
     let mut pane_splits = PaneSplits::default();
     let mut cmd_history = CmdHistoryPrefs::default();
+    let mut appearance = Appearance::default();
     let mut clipboard = Vec::new();
 
     for line in BufReader::new(file).lines() {
@@ -638,6 +651,19 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
             }
             continue;
         }
+        if let Some(rest) = trimmed.strip_prefix(APPEARANCE_TAG) {
+            // Parse `dark_mode=0|1`, like CMD_HISTORY.
+            for pair in rest.split_whitespace() {
+                let Some((k, v)) = pair.split_once('=') else {
+                    continue;
+                };
+                let on = Some(v == "1" || v.eq_ignore_ascii_case("true"));
+                if k == "dark_mode" {
+                    appearance.dark_mode = on;
+                }
+            }
+            continue;
+        }
         if let Some(rest) = trimmed.strip_prefix(REMOTE_TERMINAL_TAG) {
             let rest = rest.trim_end_matches('\r');
 
@@ -709,6 +735,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
         files_panel,
         pane_splits,
         cmd_history,
+        appearance,
         clipboard,
     })
 }
@@ -739,6 +766,7 @@ mod tests {
             FilesPanelPrefs::default(),
             PaneSplits::default(),
             CmdHistoryPrefs::default(),
+            Appearance::default(),
             &[],
             &path,
         )
@@ -777,6 +805,7 @@ mod tests {
                 FilesPanelPrefs::default(),
                 PaneSplits::default(),
                 CmdHistoryPrefs::default(),
+                Appearance::default(),
                 &[],
                 &path,
             )
@@ -821,6 +850,7 @@ mod tests {
                 FilesPanelPrefs::default(),
                 PaneSplits::default(),
                 CmdHistoryPrefs::default(),
+                Appearance::default(),
                 &[],
                 &path,
             )
@@ -864,6 +894,7 @@ mod tests {
                 FilesPanelPrefs::default(),
                 PaneSplits::default(),
                 CmdHistoryPrefs::default(),
+                Appearance::default(),
                 &[],
                 &path,
             )
@@ -903,6 +934,7 @@ mod tests {
                 prefs,
                 PaneSplits::default(),
                 CmdHistoryPrefs::default(),
+                Appearance::default(),
                 &[],
                 &path,
             )
@@ -941,6 +973,7 @@ mod tests {
                 FilesPanelPrefs::default(),
                 splits,
                 CmdHistoryPrefs::default(),
+                Appearance::default(),
                 &[],
                 &path,
             )
@@ -981,11 +1014,49 @@ mod tests {
                 FilesPanelPrefs::default(),
                 PaneSplits::default(),
                 prefs,
+                Appearance::default(),
                 &[],
                 &path,
             )
             .unwrap();
             assert_eq!(load_state(&path).unwrap().cmd_history, prefs);
+        }
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn appearance_round_trip() {
+        let path = std::env::temp_dir().join("shell_save_data_test_appearance.ss");
+        for appearance in [
+            Appearance::default(),
+            Appearance {
+                dark_mode: Some(false),
+            },
+            Appearance {
+                dark_mode: Some(true),
+            },
+        ] {
+            save_state(
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &PanelVis::default(),
+                None,
+                &OpenTabs::default(),
+                FontSizes::default(),
+                DirLabelLens::default(),
+                PanelWidths::default(),
+                FilesPanelPrefs::default(),
+                PaneSplits::default(),
+                CmdHistoryPrefs::default(),
+                appearance,
+                &[],
+                &path,
+            )
+            .unwrap();
+            assert_eq!(load_state(&path).unwrap().appearance, appearance);
         }
         let _ = fs::remove_file(&path);
     }
@@ -1031,6 +1102,7 @@ mod tests {
             FilesPanelPrefs::default(),
             PaneSplits::default(),
             CmdHistoryPrefs::default(),
+            Appearance::default(),
             &entries,
             &path,
         )
