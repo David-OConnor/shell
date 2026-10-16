@@ -436,12 +436,15 @@ pub struct CmdHistoryPrefs {
 }
 
 /// GUI appearance, as the user last left it: whether the window is dark
-/// (`dark_mode`). `None` when the state file has no value, in which case the
-/// GUI follows the OS theme. Like [PanelWidths], the CLI never reads this — it
-/// lives here only so a CLI-side save round-trips the GUI's value.
+/// (`dark_mode`; `None` follows the OS theme), and how many directory levels
+/// the path colours take to go from purple to yellow (`dir_color_depth`;
+/// `None` uses the GUI's default). `None` when the state file has no value.
+/// Like [PanelWidths], the CLI never reads this — it lives here only so a
+/// CLI-side save round-trips the GUI's values.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Appearance {
     pub dark_mode: Option<bool>,
+    pub dir_color_depth: Option<u8>,
 }
 
 /// One entry in the GUI's clipboard history (`peregrine`'s Clipboard panel):

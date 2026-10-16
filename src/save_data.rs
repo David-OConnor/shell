@@ -285,9 +285,16 @@ pub fn save_state(
     }
 
     // Appearance: GUI-only, written only when present, like FONT_SIZE.
-    // `key=0|1` pairs, like PANEL_VIS.
+    // `key=value` pairs, like PANEL_VIS.
+    let mut pairs = Vec::new();
     if let Some(on) = appearance.dark_mode {
-        writeln!(f, "{APPEARANCE_TAG}dark_mode={}", bool_to_int(on))?;
+        pairs.push(format!("dark_mode={}", bool_to_int(on)));
+    }
+    if let Some(n) = appearance.dir_color_depth {
+        pairs.push(format!("dir_color_depth={n}"));
+    }
+    if !pairs.is_empty() {
+        writeln!(f, "{APPEARANCE_TAG}{}", pairs.join(" "))?;
     }
 
     for rt in remote_terminals {
@@ -652,14 +659,17 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix(APPEARANCE_TAG) {
-            // Parse `dark_mode=0|1`, like CMD_HISTORY.
+            // Parse `dark_mode=0|1 dir_color_depth=N`, like CMD_HISTORY.
             for pair in rest.split_whitespace() {
                 let Some((k, v)) = pair.split_once('=') else {
                     continue;
                 };
-                let on = Some(v == "1" || v.eq_ignore_ascii_case("true"));
-                if k == "dark_mode" {
-                    appearance.dark_mode = on;
+                match k {
+                    "dark_mode" => {
+                        appearance.dark_mode = Some(v == "1" || v.eq_ignore_ascii_case("true"));
+                    }
+                    "dir_color_depth" => appearance.dir_color_depth = v.parse().ok(),
+                    _ => {}
                 }
             }
             continue;
@@ -1031,9 +1041,15 @@ mod tests {
             Appearance::default(),
             Appearance {
                 dark_mode: Some(false),
+                dir_color_depth: None,
             },
             Appearance {
                 dark_mode: Some(true),
+                dir_color_depth: Some(8),
+            },
+            Appearance {
+                dark_mode: None,
+                dir_color_depth: Some(12),
             },
         ] {
             save_state(
