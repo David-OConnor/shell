@@ -7,7 +7,10 @@ use std::{
     collections::HashMap,
     env, io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use rustyline::{
@@ -57,6 +60,10 @@ struct ShellHelper {
     recent_dirs: Arc<Mutex<Vec<RecentDir>>>,
     clone_roots: Arc<Mutex<Vec<String>>>,
     home: Option<PathBuf>,
+    /// Set while an SSH session is live. Commands then run on the remote, so
+    /// local files and PATH say nothing about them: no completion, and no
+    /// red "unknown command".
+    remote: Arc<AtomicBool>,
     /// Rustyline's built-in filename completer, used as the fallback when no
     /// bookmark matches (and for non-`cd` commands).
     fs_completer: FilenameCompleter,
@@ -108,7 +115,6 @@ const BUILTINS: &[&str] = &[
     "logs",
     "ssh",
     "remote",
-    "mode",
     "logout",
     "disconnect",
 ];
@@ -145,6 +151,9 @@ impl ShellHelper {
     fn command_is_valid(&self, cmd: &str) -> bool {
         if cmd.is_empty() {
             return false;
+        }
+        if self.remote.load(Ordering::Relaxed) {
+            return true;
         }
         let lower = cmd.to_ascii_lowercase();
         if BUILTINS.contains(&lower.as_str())
@@ -254,6 +263,9 @@ impl Completer for ShellHelper {
         pos: usize,
         ctx: &Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        if self.remote.load(Ordering::Relaxed) {
+            return Ok((pos, Vec::new()));
+        }
         // If the command word is `cd`, use the shared bookmark + filesystem
         // path completer so nested args like `code/Bi` resolve correctly.
         let bookmarks = self.bookmarks.lock();
@@ -683,11 +695,13 @@ fn main() {
     let home: Option<PathBuf> = env::var_os("USERPROFILE")
         .or_else(|| env::var_os("HOME"))
         .map(PathBuf::from);
+    let remote = Arc::new(AtomicBool::new(false));
     rl.set_helper(Some(ShellHelper {
         bookmarks: state.dir_bookmarks.clone(),
         recent_dirs: state.recent_dirs.clone(),
         clone_roots: state.clone_roots.clone(),
         home: home.clone(),
+        remote: remote.clone(),
         fs_completer: FilenameCompleter::new(),
         hinter: HistoryHinter::new(),
         cmd_cache: RefCell::new(HashMap::new()),
@@ -858,6 +872,7 @@ fn main() {
                 if !commands::run_command(&mut state, &state_path, &line) {
                     break;
                 }
+                remote.store(state.is_remote(), Ordering::Relaxed);
                 // The command may have changed our cwd (cd) or the current
                 // branch (`git checkout`); re-detect so the next prompt is
                 // accurate.

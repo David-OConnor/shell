@@ -1,36 +1,18 @@
 //! In-process SSH client, so the shell handles `ssh` itself instead of leaking
 //! the command through to the OS's native `ssh` binary.
 //!
-//! Built on [`russh`] (pure-Rust, no OpenSSL/libssh2 C build on Windows). russh
-//! is async, so a [`RemoteSession`] owns a small multi-threaded Tokio runtime
-//! and `block_on`s each operation — the brief block mirrors how the rest of the
-//! shell shells out with `Command::output()`. The runtime is multi-threaded (one
-//! worker) rather than current-thread so russh's background session task — and,
-//! in PTY mode, our channel reader task — keep making progress between our
-//! `block_on` calls (important for live PTY output streaming into the GUI).
+//! Built on [`russh`] (pure-Rust, no OpenSSL/libssh2 C build on Windows).
+//! [session] holds the connection itself, shared with `peregrine`: one
+//! persistent PTY running the remote login shell, so state (cwd, env,
+//! running programs) carries over between commands and interactive programs
+//! work. [cli] is the CLI's frontend for it; [keys] encodes keystrokes for
+//! both frontends.
 //!
-//! Two interaction modes, each in its own submodule, both reused by `peregrine`:
-//!   * [`exec`] — one channel per command, output captured in a batch. The
-//!     default; fits the existing output-pane model.
-//!   * [`interactive`] — a single persistent PTY + shell channel, bytes streamed
-//!     both ways. The user toggles modes at runtime via [`RemoteSession::set_mode`].
-//!
-//! Credentials are never held here long-term: [`connect`] takes the password by
-//! value (the caller pulls it from the OS keyring — see `crate::secrets`).
+//! Credentials are never held here long-term: the caller passes the password
+//! in (from the OS keyring; see [secrets]), and SSH keys are read from an
+//! agent or `~/.ssh` as needed.
 
-use std::{
-    io,
-    path::Path,
-    sync::{Arc, atomic::AtomicBool, mpsc::Receiver},
-    time::Duration,
-};
-
-use russh::{
-    ChannelWriteHalf,
-    client::{self, Handle, Msg},
-    keys::ssh_key,
-};
-use tokio::runtime::Runtime;
+use std::{io, path::Path};
 
 use crate::{
     RemoteTerminal,
@@ -38,189 +20,15 @@ use crate::{
     state::State,
 };
 
+mod cli;
+pub mod keys;
 pub mod secrets;
+mod session;
 
-mod exec;
-mod interactive;
-
-/// Which interaction mode a live session is in. Toggled at runtime; new
-/// sessions start in the `#[default]` mode ([`SshMode::Pty`]) on connect.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum SshMode {
-    /// One channel per typed command, output captured in a batch.
-    Exec,
-    #[default]
-    /// A persistent PTY + login shell with bytes streamed both ways.
-    Pty,
-}
-
-/// russh event handler. We only need server-key verification; everything else
-/// uses the trait defaults.
-struct Handler;
-
-impl client::Handler for Handler {
-    type Error = russh::Error;
-
-    // todo: Verify the key against a known_hosts store and prompt on mismatch.
-    // For now we trust-on-first-use (accept any key), matching the pragmatic
-    // posture of the rest of the shell's SSH MVP.
-    async fn check_server_key(
-        &mut self,
-        _server_public_key: &ssh_key::PublicKey,
-    ) -> Result<bool, Self::Error> {
-        Ok(true)
-    }
-}
-
-/// State for the PTY/interactive mode: the channel's write half (for sending
-/// user input), a receiver fed by a background reader task (output bytes), and
-/// a flag the reader sets when the remote shell closes.
-struct PtyChannel {
-    writer: ChannelWriteHalf<Msg>,
-    rx: Receiver<Vec<u8>>,
-    closed: Arc<AtomicBool>,
-}
-
-/// A live, authenticated SSH connection to one remote. Holds the Tokio runtime
-/// and russh client handle for its whole lifetime; each command (exec mode)
-/// opens a fresh channel on the same connection, so the password is only ever
-/// entered once.
-pub struct RemoteSession {
-    rt: Arc<Runtime>,
-    handle: Handle<Handler>,
-    user: String,
-    host: String,
-    port: u16,
-    mode: SshMode,
-    /// Remote working directory tracked across exec-mode commands so a remote
-    /// `cd` persists (each exec is otherwise an independent shell). Empty until
-    /// the first command reports it; see [`exec`].
-    cwd: String,
-    /// `Some` only while in PTY mode.
-    pty: Option<PtyChannel>,
-}
-
-/// Map a russh error into an `io::Error` so callers stay on the shell's
-/// `io::Result`-based plumbing. Shared with the `exec` / `interactive` submodules.
-pub(crate) fn map_err(e: russh::Error) -> io::Error {
-    io::Error::other(format!("ssh: {e}"))
-}
-
-/// Open and authenticate a connection. Blocks until the TCP connect + password
-/// auth complete. Returns an `io::Error` on connect failure, and a
-/// `PermissionDenied` error specifically when auth is rejected (so callers can
-/// tell "wrong password" from "host unreachable").
-pub fn connect(host: &str, port: u16, user: &str, password: &str) -> io::Result<RemoteSession> {
-    let rt = Arc::new(
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()
-            .map_err(|e| io::Error::other(format!("ssh: runtime: {e}")))?,
-    );
-
-    let config = Arc::new(client::Config {
-        // Keep idle connections alive for a long session; the user disconnects
-        // explicitly (or closes the tab / shell).
-        inactivity_timeout: Some(Duration::from_secs(3600)),
-        ..Default::default()
-    });
-
-    let handle = rt.block_on(async {
-        let mut handle = client::connect(config, (host, port), Handler)
-            .await
-            .map_err(map_err)?;
-        let auth = handle
-            .authenticate_password(user, password)
-            .await
-            .map_err(map_err)?;
-        if !auth.success() {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "ssh: authentication failed (bad username or password)",
-            ));
-        }
-        Ok::<_, io::Error>(handle)
-    })?;
-
-    // Built in Exec first because it's the base state with no PTY channel;
-    // `set_mode` below transitions from here, opening the PTY/shell channel
-    // when the default mode is Pty.
-    let mut session = RemoteSession {
-        rt,
-        handle,
-        user: user.to_string(),
-        host: host.to_string(),
-        port,
-        mode: SshMode::Exec,
-        cwd: String::new(),
-        pty: None,
-    };
-
-    // Honour the configured default interaction mode (see `SshMode`'s
-    // `#[default]`, currently Pty/interactive) rather than hardcoding one here.
-    session.set_mode(SshMode::default())?;
-
-    Ok(session)
-}
-
-impl RemoteSession {
-    /// `user@host`, for prompts and the remote-panel status line.
-    pub fn label(&self) -> String {
-        format!("{}@{}", self.user, self.host)
-    }
-
-    pub fn host(&self) -> &str {
-        &self.host
-    }
-
-    pub fn user(&self) -> &str {
-        &self.user
-    }
-
-    pub fn port(&self) -> u16 {
-        self.port
-    }
-
-    pub fn mode(&self) -> SshMode {
-        self.mode
-    }
-
-    /// Remote working directory tracked in exec mode (empty before the first
-    /// command). Used to render the prompt.
-    pub fn cwd(&self) -> &str {
-        &self.cwd
-    }
-
-    /// Switch interaction mode. Going Exec→Pty opens the PTY/shell channel;
-    /// Pty→Exec tears it down. The underlying authenticated connection is kept
-    /// either way, so toggling is cheap and doesn't re-prompt for a password.
-    pub fn set_mode(&mut self, mode: SshMode) -> io::Result<()> {
-        if mode == self.mode {
-            return Ok(());
-        }
-        match mode {
-            SshMode::Pty => self.start_pty()?,
-            SshMode::Exec => self.stop_pty(),
-        }
-        self.mode = mode;
-        Ok(())
-    }
-
-    /// Close the connection. Best-effort: any error during the polite
-    /// disconnect is ignored since we're tearing down anyway.
-    pub fn disconnect(mut self) {
-        if self.mode == SshMode::Pty {
-            self.stop_pty();
-        }
-        let rt = self.rt.clone();
-        let _ = rt.block_on(self.handle.disconnect(
-            russh::Disconnect::ByApplication,
-            "",
-            "English",
-        ));
-    }
-}
+pub use session::{
+    ConnectError, ConnectRequest, Connecting, Phase, RemoteEvent, RemoteSession, Waker, connect,
+    no_waker,
+};
 
 /// Resolve the argument to `ssh` into a concrete `(host, port, user)`: either a
 /// saved-remote index, or a freeform `[user@]host[:port]` spec. Prints a usage
@@ -259,57 +67,106 @@ pub fn record_remote(state: &State, host: &str, port: u16, user: &str) {
 }
 
 /// `ssh [user@]host [port]` / `ssh <index>` — connect and enter a remote
-/// session. The password comes from the keyring if saved; otherwise we prompt
-/// (hidden) and save it for next time.
+/// session. SSH keys (an agent's, or `~/.ssh/id_*`) are tried, and the
+/// keyring's saved password; failing those we ask for a password, and save it
+/// once it has worked.
 pub fn cmd_ssh(state: &mut State, state_path: &Path, args: &str) {
     let Some((host, port, user)) = resolve_ssh_target(state, args) else {
         return;
     };
 
-    let password = match secrets::get_password(&host, port, &user) {
-        Some(p) => p,
-        None => match read_password(&format!("Password for {user}@{host}: ")) {
-            Ok(p) => {
-                // Save for next time so future connects need no prompt.
-                if let Err(e) = secrets::set_password(&host, port, &user, &p) {
+    let mut password = secrets::get_password(&host, port, &user);
+    // Set once the user has typed a password, to save it if it works.
+    let mut typed = false;
+    for _ in 0..3 {
+        println!("Connecting to {user}@{host}:{port} … (Esc cancels)");
+        let (cols, rows) = cli::terminal_size();
+        let request = ConnectRequest {
+            host: host.clone(),
+            port,
+            user: user.clone(),
+            password: password.clone(),
+            cols,
+            rows,
+        };
+        match cli::wait_connect(connect(request, no_waker())) {
+            Ok(session) => {
+                if typed
+                    && let Some(p) = &password
+                    && let Err(e) = secrets::set_password(&host, port, &user, p)
+                {
                     eprintln!("ssh: warning: couldn't save password to keyring: {e}");
                 }
-                p
+                record_remote(state, &host, port, &user);
+                if let Err(e) = state.save(state_path) {
+                    eprintln!("warning: failed to save state: {e}");
+                }
+                state.active_remote = Some(session);
+                start_session(state);
+                return;
+            }
+            Err(ConnectError::Auth { password_tried }) => {
+                if password_tried {
+                    eprintln!("ssh: wrong password for {user}@{host}");
+                }
+                match read_password(&format!("Password for {user}@{host}: ")) {
+                    Ok(p) => {
+                        password = Some(p);
+                        typed = true;
+                    }
+                    Err(e) => {
+                        eprintln!("ssh: {e}");
+                        return;
+                    }
+                }
             }
             Err(e) => {
                 eprintln!("ssh: {e}");
                 return;
             }
-        },
-    };
-
-    println!("Connecting to {user}@{host}:{port} …");
-    match connect(&host, port, &user, &password) {
-        Ok(session) => {
-            println!(
-                "Connected to {user}@{host}. Commands run remotely; `mode pty` opens an interactive shell (python, vim, …), `exit` disconnects."
-            );
-            record_remote(state, &host, port, &user);
-            if let Err(e) = state.save(state_path) {
-                eprintln!("warning: failed to save state: {e}");
-            }
-            state.active_remote = Some(session);
-
-            // Stay in the shell's own command interface — prompt, history,
-            // highlighting, completion — and route each typed command to the
-            // remote via exec mode. (The session connects in PTY mode by
-            // default for the GUI's sake; the CLI switches to exec so it keeps
-            // its rich line editing instead of handing the terminal to a raw
-            // remote shell.) The user opts into a raw interactive shell with
-            // `mode pty` when one is actually needed — e.g. python, vim, top.
-            if let Some(session) = state.active_remote.as_mut()
-                && let Err(e) = session.set_mode(SshMode::Exec)
-            {
-                eprintln!("ssh: {e}");
-            }
         }
-        Err(e) => eprintln!("ssh: {e}"),
     }
+    eprintln!("ssh: giving up after 3 tries");
+}
+
+/// Wait for a new session's shell to come up, then report it.
+fn start_session(state: &mut State) {
+    let Some(session) = state.active_remote.as_mut() else {
+        return;
+    };
+    let label = session.label();
+    let outcome = cli::finish_starting(session);
+    if !end_if_over(state, outcome) {
+        println!(
+            "Connected to {label}. Commands run there now; `exit` logs out. If it stops responding, Enter then ~. disconnects."
+        );
+    }
+}
+
+/// Run `line` on the remote, handing it the terminal until it's done.
+pub(crate) fn run_remote(state: &mut State, line: &str) {
+    let Some(session) = state.active_remote.as_mut() else {
+        return;
+    };
+    session.run(line);
+    let outcome = cli::passthrough(session);
+    end_if_over(state, outcome);
+}
+
+/// Disconnect after a session's terminal reports it's over. Returns whether
+/// it was.
+fn end_if_over(state: &mut State, outcome: io::Result<cli::Outcome>) -> bool {
+    let message = match outcome {
+        Ok(cli::Outcome::Ready) => return false,
+        Ok(cli::Outcome::Closed) => "ssh: connection closed".to_string(),
+        Ok(cli::Outcome::Dropped) => "ssh: disconnected".to_string(),
+        Err(e) => format!("ssh: terminal error: {e}; disconnected"),
+    };
+    if let Some(session) = state.active_remote.take() {
+        session.disconnect();
+    }
+    println!("{message}");
+    true
 }
 
 /// Render the saved-remotes list in the same paginated frame as the
@@ -478,9 +335,9 @@ fn read_password(prompt: &str) -> io::Result<String> {
 
 /// Build the remote shell command that `sync <message>` maps to over SSH.
 /// Mirrors the local [`crate::commands::sync`] steps (add → commit → push) as a
-/// single `&&`-chained line so it stops on the first failure, run from the
-/// session's tracked remote cwd. Returns `None` (after emitting a diagnostic
-/// via `sink`) when the commit message is empty, matching the local guard.
+/// single `&&`-chained line so it stops on the first failure. Returns `None`
+/// (after emitting a diagnostic via `sink`) when the commit message is empty,
+/// matching the local guard.
 pub fn remote_sync_command(message: &str, sink: OutputSink) -> Option<String> {
     let message = message.trim().trim_matches('"');
     if message.is_empty() {
@@ -498,15 +355,13 @@ pub fn remote_sync_command(message: &str, sink: OutputSink) -> Option<String> {
     ))
 }
 
-/// Build the remote shell command that `logs <service>` maps to over SSH.
-/// Mirrors the non-follow local path ([`crate::commands::logs`] with
-/// `follow = false`): a bounded, non-paged snapshot, since exec-mode SSH has no
-/// tty to host a live `-f` tail. `journalctl` runs under `sudo` to match the
-/// local built-in — over exec mode (no tty) that needs passwordless sudo on the
-/// remote, otherwise sudo's prompt surfaces as a stderr diagnostic. Returns
-/// `None` (after emitting a diagnostic via `sink`) when the service name is
-/// empty, matching the local guard.
-pub fn remote_logs_command(service: &str, sink: OutputSink) -> Option<String> {
+/// Build the remote shell command that `logs <service>` maps to over SSH,
+/// matching the local [`crate::commands::logs`]: a live tail with `follow`
+/// (Ctrl+C ends it), otherwise a bounded snapshot. It runs in the remote
+/// terminal, so `sudo` can ask for its password. Returns `None` (after
+/// emitting a diagnostic via `sink`) when the service name is empty, matching
+/// the local guard.
+pub fn remote_logs_command(service: &str, follow: bool, sink: OutputSink) -> Option<String> {
     let service = service.trim().trim_matches('"');
     if service.is_empty() {
         sink(
@@ -517,178 +372,9 @@ pub fn remote_logs_command(service: &str, sink: OutputSink) -> Option<String> {
     }
     // Single-quote the unit name so it survives the remote shell intact.
     let escaped = service.replace('\'', "'\\''");
-    Some(format!("sudo journalctl -u '{escaped}' -n 200 --no-pager"))
-}
-
-/// `mode exec|pty` while connected: switch the live session's interaction mode.
-/// Entering PTY mode runs the raw-terminal interactive loop until the remote
-/// shell exits (then we disconnect) or the user detaches with Ctrl+] (then we
-/// return to exec mode, keeping the connection).
-pub(crate) fn remote_set_mode(state: &mut State, args: &str) {
-    let target = match args.trim() {
-        "pty" | "interactive" | "shell" => SshMode::Pty,
-        "exec" | "cmd" | "" => SshMode::Exec,
-        other => {
-            eprintln!("mode: expected `exec` or `pty`, got `{other}`");
-            return;
-        }
-    };
-
-    if target == SshMode::Exec {
-        if let Some(session) = state.active_remote.as_mut()
-            && let Err(e) = session.set_mode(SshMode::Exec)
-        {
-            eprintln!("mode: {e}");
-        }
-        return;
-    }
-
-    // Entering PTY mode: open the shell channel (a no-op if we're already in
-    // PTY mode, e.g. straight after connect), then drive the interactive loop.
-    if let Some(session) = state.active_remote.as_mut()
-        && let Err(e) = session.set_mode(SshMode::Pty)
-    {
-        eprintln!("mode: {e}");
-        return;
-    }
-    enter_pty_loop(state);
-}
-
-/// Drive the raw-terminal interactive loop for the active session's PTY,
-/// returning to the caller when the remote shell exits (we disconnect) or the
-/// user detaches with Ctrl+] (we drop back to exec mode, keeping the
-/// connection). The session must already be in [`SshMode::Pty`]. Shared by the
-/// initial connect (which lands in PTY mode by default) and `mode pty`.
-pub fn enter_pty_loop(state: &mut State) {
-    if let Some(session) = state.active_remote.as_mut() {
-        println!("-- interactive shell (Ctrl+] to detach to command mode) --");
-        if let Err(e) = cli_pty_loop(session) {
-            eprintln!("mode: pty: {e}");
-        }
-    }
-
-    // The loop ended: either the remote shell exited (disconnect entirely) or
-    // the user detached (drop back to exec mode, keeping the connection).
-    let closed = state
-        .active_remote
-        .as_ref()
-        .map(|s| s.pty_closed())
-        .unwrap_or(false);
-    if closed {
-        if let Some(session) = state.active_remote.take() {
-            session.disconnect();
-        }
-        println!("ssh: remote shell exited; disconnected");
-    } else if let Some(session) = state.active_remote.as_mut() {
-        let _ = session.set_mode(SshMode::Exec);
-        println!(
-            "ssh: detached to command mode (`mode pty` resumes the interactive shell, `exit` disconnects)"
-        );
-    }
-}
-
-/// Translate a crossterm key event into the bytes to feed the remote PTY.
-/// Covers printable chars, Ctrl-letters, and the common navigation/edit keys.
-pub fn key_to_bytes(key: crossterm::event::KeyEvent) -> Option<Vec<u8>> {
-    use crossterm::event::{KeyCode, KeyModifiers};
-
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    match key.code {
-        KeyCode::Char(c) => {
-            if ctrl {
-                let upper = c.to_ascii_uppercase();
-                if upper.is_ascii_alphabetic() {
-                    return Some(vec![upper as u8 - b'A' + 1]);
-                }
-                match c {
-                    ' ' => return Some(vec![0]),
-                    '\\' => return Some(vec![0x1c]),
-                    _ => {}
-                }
-            }
-            let mut buf = [0u8; 4];
-            Some(c.encode_utf8(&mut buf).as_bytes().to_vec())
-        }
-        KeyCode::Enter => Some(vec![b'\r']),
-        KeyCode::Backspace => Some(vec![0x7f]),
-        KeyCode::Tab => Some(vec![b'\t']),
-        KeyCode::Esc => Some(vec![0x1b]),
-        KeyCode::Up => Some(b"\x1b[A".to_vec()),
-        KeyCode::Down => Some(b"\x1b[B".to_vec()),
-        KeyCode::Right => Some(b"\x1b[C".to_vec()),
-        KeyCode::Left => Some(b"\x1b[D".to_vec()),
-        KeyCode::Home => Some(b"\x1b[H".to_vec()),
-        KeyCode::End => Some(b"\x1b[F".to_vec()),
-        KeyCode::Delete => Some(b"\x1b[3~".to_vec()),
-        KeyCode::PageUp => Some(b"\x1b[5~".to_vec()),
-        KeyCode::PageDown => Some(b"\x1b[6~".to_vec()),
-        _ => None,
-    }
-}
-
-/// Raw-terminal interactive loop for PTY mode. Puts the terminal into raw mode,
-/// pumps keystrokes to the remote and remote output to stdout, and returns when
-/// the remote shell closes or the user presses Ctrl+] to detach. Always
-/// restores cooked mode on the way out.
-fn cli_pty_loop(session: &mut RemoteSession) -> io::Result<()> {
-    use std::io::Write;
-
-    use crossterm::{
-        event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
-        terminal,
-    };
-
-    terminal::enable_raw_mode()?;
-    if let Ok((cols, rows)) = terminal::size() {
-        let _ = session.window_change(cols as u32, rows as u32);
-    }
-
-    // Inner closure so we can always disable raw mode afterwards, even on error.
-    let pump = || -> io::Result<()> {
-        let mut stdout = io::stdout();
-        loop {
-            if session.pty_closed() {
-                break;
-            }
-            let out = session.drain_output();
-            if !out.is_empty() {
-                stdout.write_all(&out)?;
-                stdout.flush()?;
-            }
-            // Short poll so we keep draining output even while idle.
-            if event::poll(std::time::Duration::from_millis(10))? {
-                match event::read()? {
-                    Event::Key(key) if key.kind != KeyEventKind::Release => {
-                        // Ctrl+] detaches back to exec mode without closing the shell.
-                        if key.modifiers.contains(KeyModifiers::CONTROL)
-                            && key.code == KeyCode::Char(']')
-                        {
-                            break;
-                        }
-                        if let Some(bytes) = key_to_bytes(key) {
-                            session.send(&bytes)?;
-                        }
-                    }
-                    Event::Resize(cols, rows) => {
-                        let _ = session.window_change(cols as u32, rows as u32);
-                    }
-                    _ => {}
-                }
-            }
-        }
-        Ok(())
-    };
-
-    let result = pump();
-    terminal::disable_raw_mode()?;
-
-    // Flush any trailing output produced after the loop broke.
-    let out = session.drain_output();
-    if !out.is_empty() {
-        let mut stdout = io::stdout();
-        let _ = stdout.write_all(&out);
-        let _ = stdout.flush();
-    }
-    println!();
-    result
+    Some(if follow {
+        format!("sudo journalctl -u '{escaped}' -f")
+    } else {
+        format!("sudo journalctl -u '{escaped}' -n 200 --no-pager")
+    })
 }

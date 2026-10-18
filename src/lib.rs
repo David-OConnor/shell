@@ -18,7 +18,7 @@ pub use input_completion::{
     complete_command_path,
 };
 pub use python::{VENV_PREFIX, venv_python};
-pub use ssh::{RemoteSession, SshMode};
+pub use ssh::RemoteSession;
 pub use state::{
     Appearance, BrowserFile, ClipboardContent, ClipboardEntry, CmdHistoryPrefs, DirLabelLens, FilesPanelPrefs, FontSizes, HistoryItem, NavState, OpenTabs, PaneSplits, PanelVis, PanelWidths, RecentDir,
     RemoteTerminal, WindowSize, dedup_history, record_clone_root, record_history, record_recent_dir,

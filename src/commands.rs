@@ -476,9 +476,10 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
     }
     let input = expanded.line.as_str();
 
-    // While an SSH session is live, typed commands run on the remote rather
-    // than locally. Only the session-management keywords are intercepted here;
-    // everything else (including `cd`, `ls`, …) is sent to the remote shell.
+    // While an SSH session is live, typed commands run in the remote shell,
+    // which keeps its state (cwd, env) between them, and gets the terminal
+    // while they run. Only the session-management keywords are intercepted
+    // here; everything else (including `cd`, `exit`) goes to the remote.
     if state.active_remote.is_some() {
         let mut sink = |kind, msg: String| {
             let msg = msg.trim_end_matches('\n');
@@ -494,15 +495,11 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
         // command — the remote shell has never heard of them and would just
         // answer "command not found". Everything else is sent verbatim.
         let remote_cmd: Option<String> = match cmd {
-            "exit" | "quit" | "logout" | "disconnect" => {
+            "disconnect" | "quit" => {
                 if let Some(session) = state.active_remote.take() {
                     session.disconnect();
                 }
                 println!("ssh: disconnected");
-                return true;
-            }
-            "mode" => {
-                ssh::remote_set_mode(state, args);
                 return true;
             }
             // Our own help, not the remote's — answer locally.
@@ -514,7 +511,7 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
                 println!("{}", version_line());
                 return true;
             }
-            "logs" => match ssh::remote_logs_command(args, &mut sink) {
+            "logs" => match ssh::remote_logs_command(args, true, &mut sink) {
                 Some(cmd) => Some(cmd),
                 None => return true,
             },
@@ -535,11 +532,8 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
             _ => Some(input.to_string()),
         };
 
-        if let Some(command) = remote_cmd
-            && let Some(session) = state.active_remote.as_mut()
-            && let Err(e) = session.run(&command, &mut sink)
-        {
-            eprintln!("ssh: {e}");
+        if let Some(command) = remote_cmd {
+            ssh::run_remote(state, &command);
         }
         return true;
     }
@@ -969,7 +963,7 @@ pub fn shelp_text(frontend: Frontend) -> String {
         ),
         (
             "ssh [user@]host [port]",
-            "Connect to a host; `ssh <number>` connects to a saved remote",
+            "Log in to a host and run commands there, as with `ssh`, until `exit`. Uses your SSH keys, else a saved or typed password. `ssh <number>` connects to a saved remote",
         ),
         ("remote list", "List saved remotes with their indices"),
         if cli {
@@ -988,19 +982,19 @@ pub fn shelp_text(frontend: Frontend) -> String {
             "Forget a saved remote, and its stored password",
         ),
         (
-            "mode exec|pty",
-            "While connected: captured per-command output, or an interactive shell",
+            "disconnect",
+            "While connected to a remote, close the connection",
         ),
     ]);
     commands.push(if cli {
         (
             "exit, quit",
-            "Exit the shell. While connected to a remote, disconnect instead",
+            "Exit the shell. While connected to a remote, `exit` logs out of it, and `quit` disconnects",
         )
     } else {
         (
             "exit, quit",
-            "While connected to a remote, disconnect. Otherwise, close the window",
+            "While connected to a remote, `exit` logs out of it, and `quit` disconnects. Otherwise, close the window",
         )
     });
     commands.extend_from_slice(&[
@@ -1039,7 +1033,10 @@ pub fn shelp_text(frontend: Frontend) -> String {
             ("Ctrl + 3", "List command history"),
             ("Ctrl + 4", "List history in the current directory"),
             ("Ctrl + 5", "List saved SSH remotes"),
-            ("Ctrl + ]", "Leave an interactive (PTY) remote shell"),
+            (
+                "Enter, ~ .",
+                "While a remote command runs: disconnect, when the connection stops responding",
+            ),
             ("Ctrl + C", "Cancel the current input"),
             ("Ctrl + D", "Exit"),
         ]

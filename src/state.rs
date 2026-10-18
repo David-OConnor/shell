@@ -124,6 +124,11 @@ impl Default for State {
 }
 
 impl State {
+    /// Whether an SSH session is live, so typed commands run on the remote.
+    pub fn is_remote(&self) -> bool {
+        self.active_remote.is_some()
+    }
+
     /// This defines what the general prompt looks like. Its adorning
     /// characters let the user know they're in this shell. `nav` carries
     /// the active recall cursors (see [NavState]); when either is `Some`,
@@ -131,23 +136,13 @@ impl State {
     /// which item is currently loaded into the input.
     pub fn prompt(&self, nav: &NavState) -> String {
         // When connected to a remote, the prompt reflects the SSH session
-        // (user@host + the tracked remote cwd) so the user always knows their
+        // (user@host + the remote shell's cwd) so the user always knows their
         // commands are running elsewhere.
         if let Some(remote) = &self.active_remote {
-            let cwd = if remote.cwd().is_empty() {
-                "~"
-            } else {
-                remote.cwd()
-            };
-            let mode = match remote.mode() {
-                crate::SshMode::Exec => "",
-                crate::SshMode::Pty => " (pty)",
-            };
             return format!(
-                "S [{}:{}]{}{}{} $ ",
+                "S [{}:{}]{}{} $ ",
                 remote.label(),
-                cwd,
-                mode,
+                remote.display_cwd(),
                 nav.his_indicator(),
                 nav.cd_indicator(),
             );

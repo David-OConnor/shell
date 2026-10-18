@@ -220,19 +220,22 @@ also works on Windows.
 
 ![Example bookmarks and ssh](/screenshots/ssh_example_0.png)
 
-The shell handles `ssh` itself (in-process, via the `russh` library) instead of launching the OS's `ssh` client. Passwords are stored in the OS keyring (Windows Credential Manager / macOS Keychain / Linux Secret Service), never in the state file — so reconnecting to a saved remote needs no re-typing.
+The shell handles `ssh` itself (in-process, via the `russh` library) instead of launching the OS's `ssh` client. While connected, it's as if you'd logged in with `ssh`: commands run in your remote login shell, which keeps its working directory and environment between them, and interactive programs (`vim`, `nano`, `top`, `less`, `sudo`, a Python REPL) work as usual. You keep the shell's own prompt, history, and commands (`sync`, `logs`, `pull`, …) while typing them.
+
+Logging in uses your SSH keys (from a running SSH agent, or `~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa` without a passphrase) or a password. Passwords are stored in the OS keyring (Windows Credential Manager / macOS Keychain / Linux keyutils), never in the state file — so reconnecting to a saved remote needs no re-typing.
 
 - `ssh [user@]host [port]` or `ssh <number>`: Connect to a host, or to a saved
-  remote by its `remote list` index. On first connect you're prompted for a
-  password (entered hidden), which is then saved to the keyring.
+  remote by its `remote list` index. If no key is accepted and no password is
+  saved, you're prompted for one (entered hidden), which is saved to the
+  keyring once it works. Esc cancels a connection attempt.
 - `remote list` (or Ctrl + 5): List saved remotes with their indices.
 - `remote add [user@]host[:port]`: Save a remote (prompts for a password to store).
 - `remote del <number>`: Remove a saved remote (and its keyring password).
-- While connected, typed commands run on the remote. Two modes:
-  - **exec** (default): each command runs and its output is captured.
-  - `mode pty`: an interactive shell (full-screen apps like `vim`/`top` work);
-    Ctrl+] detaches back to exec mode. `mode exec` switches back.
-- `exit` (while connected) disconnects and returns to the local shell.
+- `exit` (while connected) logs out of the remote; `disconnect` closes the
+  connection. If the connection stops responding mid-command, press Enter
+  then `~.`, as with OpenSSH.
+
+Knowing when each command finishes relies on a small prompt hook installed in the remote shell when you connect (bash, zsh, or POSIX `sh`). With other shells (fish, say), you get a plain remote terminal instead, with the remote's own prompt.
 
 
 ## Key commands
