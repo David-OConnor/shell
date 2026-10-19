@@ -60,6 +60,9 @@ pub struct State {
     /// GUI Bookmarks / Recent dirs path lengths. Held only to round-trip the
     /// `DIR_LABEL_LEN` line, like `font_size`.
     pub dir_label_lens: DirLabelLens,
+    /// GUI Bookmarks panel ordering. Held only to round-trip the `BM_SORT`
+    /// and `BM_ORDER` lines, like `font_size`.
+    pub bookmark_view: BookmarkView,
     /// GUI side-panel widths. Held only to round-trip the `PANEL_WIDTH` line,
     /// like `font_size`.
     pub panel_widths: PanelWidths,
@@ -111,6 +114,7 @@ impl Default for State {
             open_tabs: OpenTabs::default(),
             font_size: FontSizes::default(),
             dir_label_lens: DirLabelLens::default(),
+            bookmark_view: BookmarkView::default(),
             panel_widths: PanelWidths::default(),
             files_panel: FilesPanelPrefs::default(),
             pane_splits: PaneSplits::default(),
@@ -228,6 +232,7 @@ impl State {
             &self.open_tabs,
             self.font_size,
             self.dir_label_lens,
+            &self.bookmark_view,
             self.panel_widths,
             self.files_panel,
             self.pane_splits,
@@ -260,6 +265,7 @@ impl State {
             open_tabs: loaded.open_tabs,
             font_size: loaded.font_size,
             dir_label_lens: loaded.dir_label_lens,
+            bookmark_view: loaded.bookmark_view,
             panel_widths: loaded.panel_widths,
             files_panel: loaded.files_panel,
             pane_splits: loaded.pane_splits,
@@ -376,6 +382,51 @@ pub struct DirLabelLens {
     pub recent_dirs: Option<usize>,
     pub bookmark_names: Option<bool>,
     pub recent_dir_names: Option<bool>,
+}
+
+/// How the GUI's Bookmarks panel orders its rows. The GUI picks the default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BookmarkSort {
+    /// Oldest first: the order [State::dir_bookmarks] keeps them in.
+    Added,
+    /// By each dir's final name, ignoring case.
+    Alpha,
+    /// By path, so dirs in the same part of the tree sit together.
+    Proximity,
+    /// The order the user dragged them into; see [BookmarkView::order].
+    Custom,
+}
+
+impl BookmarkSort {
+    /// The name the state file stores it under.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Added => "added",
+            Self::Alpha => "alpha",
+            Self::Proximity => "proximity",
+            Self::Custom => "custom",
+        }
+    }
+
+    /// The mode stored as `key` (see [Self::key]), if any.
+    pub fn from_key(key: &str) -> Option<Self> {
+        [Self::Added, Self::Alpha, Self::Proximity, Self::Custom]
+            .into_iter()
+            .find(|s| s.key() == key)
+    }
+}
+
+/// GUI Bookmarks panel ordering: the sort mode (`None` when the state file
+/// has none, in which case the GUI uses its default), and the order the user
+/// dragged the bookmarks into for [BookmarkSort::Custom]. `order` can name
+/// bookmarks since removed, and miss ones added since (e.g. by the CLI's
+/// Ctrl+B); the GUI skips the first and puts the second last. Like
+/// [FontSizes], the CLI never reads these — they live here only so a
+/// CLI-side save round-trips the GUI's values.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BookmarkView {
+    pub sort: Option<BookmarkSort>,
+    pub order: Vec<PathBuf>,
 }
 
 /// GUI side-panel widths, in logical points, as the user last dragged them.

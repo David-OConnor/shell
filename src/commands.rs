@@ -1049,6 +1049,10 @@ pub fn shelp_text(frontend: Frontend) -> String {
                 "Left / Right",
                 "Walk recent directories, while the input is empty",
             ),
+            (
+                "Ctrl + B",
+                "Bookmark the current directory, or remove its bookmark. Works anywhere in the window",
+            ),
         ]
     };
 

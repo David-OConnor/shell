@@ -29,7 +29,7 @@ use std::{
 use chrono::{DateTime, SecondsFormat, Utc};
 
 use crate::state::{
-    Appearance, ClipboardContent, ClipboardEntry, CmdHistoryPrefs, DirLabelLens, FilesPanelPrefs, FontSizes, HistoryItem, OpenTabs, PaneSplits, PanelVis,
+    Appearance, BookmarkSort, BookmarkView, ClipboardContent, ClipboardEntry, CmdHistoryPrefs, DirLabelLens, FilesPanelPrefs, FontSizes, HistoryItem, OpenTabs, PaneSplits, PanelVis,
     PanelWidths,
     RecentDir, RemoteTerminal, WindowSize,
 };
@@ -37,6 +37,8 @@ use crate::state::{
 pub const FILENAME: &str = "shell_state.ss";
 
 const BOOKMARK_TAG: &str = "BM ";
+const BOOKMARK_SORT_TAG: &str = "BM_SORT ";
+const BOOKMARK_ORDER_TAG: &str = "BM_ORDER ";
 const RECENT_DIR_TAG: &str = "REC_DIR ";
 const HISTORY_TAG: &str = "HIS ";
 const REMOTE_TERMINAL_TAG: &str = "REMOTE_TERMINAL ";
@@ -82,6 +84,10 @@ pub struct LoadedState {
     /// GUI Bookmarks / Recent dirs path lengths, in characters. Each is `None`
     /// when the `DIR_LABEL_LEN` line lacks it, as with `font_size`.
     pub dir_label_lens: DirLabelLens,
+    /// GUI Bookmarks panel ordering. `sort` is `None` when the file has no
+    /// `BM_SORT` line, as with `font_size`, and `order` is empty when it has
+    /// no `BM_ORDER` lines.
+    pub bookmark_view: BookmarkView,
     /// GUI side-panel widths, in points. Each is `None` when the `PANEL_WIDTH`
     /// line lacks it, as with `font_size`.
     pub panel_widths: PanelWidths,
@@ -123,6 +129,7 @@ pub fn save_state(
     open_tabs: &OpenTabs,
     font_size: FontSizes,
     dir_label_lens: DirLabelLens,
+    bookmark_view: &BookmarkView,
     panel_widths: PanelWidths,
     files_panel: FilesPanelPrefs,
     pane_splits: PaneSplits,
@@ -146,6 +153,15 @@ pub fn save_state(
 
     for bm in bookmarks {
         writeln!(f, "{BOOKMARK_TAG}{}", bm.display())?;
+    }
+
+    // BookmarkView: GUI-only. The sort mode is written only when present,
+    // like FONT_SIZE; the custom order is one path per line, like BM.
+    if let Some(sort) = bookmark_view.sort {
+        writeln!(f, "{BOOKMARK_SORT_TAG}{}", sort.key())?;
+    }
+    for bm in &bookmark_view.order {
+        writeln!(f, "{BOOKMARK_ORDER_TAG}{}", bm.display())?;
     }
 
     for r in recent_dirs {
@@ -397,6 +413,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
                 open_tabs: OpenTabs::default(),
                 font_size: FontSizes::default(),
                 dir_label_lens: DirLabelLens::default(),
+                bookmark_view: BookmarkView::default(),
                 panel_widths: PanelWidths::default(),
                 files_panel: FilesPanelPrefs::default(),
                 pane_splits: PaneSplits::default(),
@@ -418,6 +435,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
     let mut open_tabs = OpenTabs::default();
     let mut font_size = FontSizes::default();
     let mut dir_label_lens = DirLabelLens::default();
+    let mut bookmark_view = BookmarkView::default();
     let mut panel_widths = PanelWidths::default();
     let mut files_panel = FilesPanelPrefs::default();
     let mut pane_splits = PaneSplits::default();
@@ -437,6 +455,17 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
 
         if let Some(rest) = trimmed.strip_prefix(BOOKMARK_TAG) {
             bookmarks.push(PathBuf::from(rest.trim_end()));
+            continue;
+        }
+
+        if let Some(rest) = trimmed.strip_prefix(BOOKMARK_SORT_TAG) {
+            // An unknown mode leaves it at `None` (the GUI's default).
+            bookmark_view.sort = BookmarkSort::from_key(rest.trim_end());
+            continue;
+        }
+
+        if let Some(rest) = trimmed.strip_prefix(BOOKMARK_ORDER_TAG) {
+            bookmark_view.order.push(PathBuf::from(rest.trim_end()));
             continue;
         }
 
@@ -741,6 +770,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
         open_tabs,
         font_size,
         dir_label_lens,
+        bookmark_view,
         panel_widths,
         files_panel,
         pane_splits,
@@ -772,6 +802,7 @@ mod tests {
             &OpenTabs::default(),
             FontSizes::default(),
             DirLabelLens::default(),
+            &BookmarkView::default(),
             PanelWidths::default(),
             FilesPanelPrefs::default(),
             PaneSplits::default(),
@@ -811,6 +842,7 @@ mod tests {
                 &OpenTabs::default(),
                 sizes,
                 DirLabelLens::default(),
+                &BookmarkView::default(),
                 PanelWidths::default(),
                 FilesPanelPrefs::default(),
                 PaneSplits::default(),
@@ -856,6 +888,7 @@ mod tests {
                 &OpenTabs::default(),
                 FontSizes::default(),
                 lens,
+                &BookmarkView::default(),
                 PanelWidths::default(),
                 FilesPanelPrefs::default(),
                 PaneSplits::default(),
@@ -900,6 +933,7 @@ mod tests {
                 &OpenTabs::default(),
                 FontSizes::default(),
                 DirLabelLens::default(),
+                &BookmarkView::default(),
                 widths,
                 FilesPanelPrefs::default(),
                 PaneSplits::default(),
@@ -940,6 +974,7 @@ mod tests {
                 &OpenTabs::default(),
                 FontSizes::default(),
                 DirLabelLens::default(),
+                &BookmarkView::default(),
                 PanelWidths::default(),
                 prefs,
                 PaneSplits::default(),
@@ -979,6 +1014,7 @@ mod tests {
                 &OpenTabs::default(),
                 FontSizes::default(),
                 DirLabelLens::default(),
+                &BookmarkView::default(),
                 PanelWidths::default(),
                 FilesPanelPrefs::default(),
                 splits,
@@ -1020,6 +1056,7 @@ mod tests {
                 &OpenTabs::default(),
                 FontSizes::default(),
                 DirLabelLens::default(),
+                &BookmarkView::default(),
                 PanelWidths::default(),
                 FilesPanelPrefs::default(),
                 PaneSplits::default(),
@@ -1063,6 +1100,7 @@ mod tests {
                 &OpenTabs::default(),
                 FontSizes::default(),
                 DirLabelLens::default(),
+                &BookmarkView::default(),
                 PanelWidths::default(),
                 FilesPanelPrefs::default(),
                 PaneSplits::default(),
@@ -1114,6 +1152,7 @@ mod tests {
             &OpenTabs::default(),
             FontSizes::default(),
             DirLabelLens::default(),
+            &BookmarkView::default(),
             PanelWidths::default(),
             FilesPanelPrefs::default(),
             PaneSplits::default(),
@@ -1132,6 +1171,55 @@ mod tests {
         )
         .unwrap();
         assert!(load_state(&path).unwrap().clipboard.is_empty());
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn bookmark_view_round_trip() {
+        let path = std::env::temp_dir().join("shell_save_data_test_bookmark_view.ss");
+        let bookmarks = vec![PathBuf::from("/a/b"), PathBuf::from("/a/c d")];
+        for view in [
+            BookmarkView::default(),
+            BookmarkView {
+                sort: Some(BookmarkSort::Proximity),
+                order: Vec::new(),
+            },
+            BookmarkView {
+                sort: Some(BookmarkSort::Custom),
+                order: vec![PathBuf::from("/a/c d"), PathBuf::from("/a/b")],
+            },
+        ] {
+            save_state(
+                &bookmarks,
+                &[],
+                &[],
+                &[],
+                &[],
+                &PanelVis::default(),
+                None,
+                &OpenTabs::default(),
+                FontSizes::default(),
+                DirLabelLens::default(),
+                &view,
+                PanelWidths::default(),
+                FilesPanelPrefs::default(),
+                PaneSplits::default(),
+                CmdHistoryPrefs::default(),
+                Appearance::default(),
+                &[],
+                &path,
+            )
+            .unwrap();
+            let loaded = load_state(&path).unwrap();
+            assert_eq!(loaded.bookmark_view, view);
+            // The custom order's lines aren't taken for bookmarks.
+            assert_eq!(loaded.bookmarks, bookmarks);
+        }
+
+        // An unknown mode is dropped rather than failing the load.
+        fs::write(&path, "BM_SORT sideways
+").unwrap();
+        assert_eq!(load_state(&path).unwrap().bookmark_view.sort, None);
         let _ = fs::remove_file(&path);
     }
 }

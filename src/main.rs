@@ -23,7 +23,7 @@ use rustyline::{
     validate::Validator,
 };
 use shell::{
-    Appearance, ClipboardEntry, CmdHistoryPrefs, DISP_PAGE_LEN, DirLabelLens, FilesPanelPrefs, FontSizes, NavState, OpenTabs, PaneSplits, PanelVis,
+    Appearance, BookmarkView, ClipboardEntry, CmdHistoryPrefs, DISP_PAGE_LEN, DirLabelLens, FilesPanelPrefs, FontSizes, NavState, OpenTabs, PaneSplits, PanelVis,
     PanelWidths, RemoteTerminal, WindowSize, commands, complete_cd_path, complete_clone_url,
     complete_command_path, page_count, save_data,
     state::{HistoryItem, RecentDir},
@@ -421,6 +421,9 @@ struct BookmarkHandler {
     /// Snapshot of the GUI's Bookmarks / Recent dirs path lengths, written
     /// back unchanged for the same reason as `panel_vis`.
     dir_label_lens: DirLabelLens,
+    /// Snapshot of the GUI's Bookmarks panel ordering, written back unchanged
+    /// for the same reason as `panel_vis`.
+    bookmark_view: BookmarkView,
     /// Snapshot of the GUI's side-panel widths, written back unchanged for the
     /// same reason as `panel_vis`.
     panel_widths: PanelWidths,
@@ -484,6 +487,7 @@ impl ConditionalEventHandler for BookmarkHandler {
                         &self.open_tabs,
                         self.font_size,
                         self.dir_label_lens,
+                        &self.bookmark_view,
                         self.panel_widths,
                         self.files_panel,
                         self.pane_splits,
@@ -748,6 +752,7 @@ fn main() {
             open_tabs: state.open_tabs.clone(),
             font_size: state.font_size,
             dir_label_lens: state.dir_label_lens,
+            bookmark_view: state.bookmark_view.clone(),
             panel_widths: state.panel_widths,
             files_panel: state.files_panel,
             pane_splits: state.pane_splits,
