@@ -423,7 +423,11 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
                         println!("> {text}  (in {})", dir.display());
                         // Expand shorthands (`run`, `pull`, …) so they work
                         // here too; the system shell has never heard of them.
-                        let root = state.clone_roots.lock().ok().and_then(|r| r.last().cloned());
+                        let root = state
+                            .clone_roots
+                            .lock()
+                            .ok()
+                            .and_then(|r| r.last().cloned());
                         let text = expand_input(&text, root.as_deref(), Some(&dir)).line;
                         let result = if cfg!(windows) {
                             Command::new("pwsh")
@@ -469,7 +473,11 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
     // the user typed. Done before the SSH branch so the remote, which has
     // never heard of `pull`, receives the full command.
     let local_cwd = state.active_remote.is_none().then_some(state.cwd.as_path());
-    let newest_root = state.clone_roots.lock().ok().and_then(|r| r.last().cloned());
+    let newest_root = state
+        .clone_roots
+        .lock()
+        .ok()
+        .and_then(|r| r.last().cloned());
     let expanded = expand_input(input, newest_root.as_deref(), local_cwd);
     if expanded.echo {
         println!("> {}", expanded.line);

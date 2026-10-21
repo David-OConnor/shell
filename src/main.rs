@@ -23,8 +23,9 @@ use rustyline::{
     validate::Validator,
 };
 use shell::{
-    Appearance, BookmarkView, ClipboardEntry, CmdHistoryPrefs, DISP_PAGE_LEN, DirLabelLens, FilesPanelPrefs, FontSizes, NavState, OpenTabs, PaneSplits, PanelVis,
-    PanelWidths, RemoteTerminal, WindowSize, commands, complete_cd_path, complete_clone_url,
+    Appearance, BookmarkView, ClipboardEntry, CmdHistoryPrefs, DISP_PAGE_LEN, DirLabelLens,
+    FilesPanelPrefs, FontSizes, NavState, OpenTabs, PaneSplits, PanelVis, PanelWidths,
+    RemoteTerminal, ScratchpadPrefs, WindowSize, commands, complete_cd_path, complete_clone_url,
     complete_command_path, page_count, save_data,
     state::{HistoryItem, RecentDir},
 };
@@ -442,6 +443,15 @@ struct BookmarkHandler {
     /// Snapshot of the GUI's clipboard history, written back unchanged for
     /// the same reason as `panel_vis`.
     clipboard: Vec<ClipboardEntry>,
+    /// Snapshot of the GUI's scratchpad text, written back unchanged for
+    /// the same reason as `panel_vis`.
+    scratchpad: String,
+    /// Snapshot of the GUI's scratchpad settings, written back unchanged for
+    /// the same reason as `panel_vis`.
+    scratchpad_prefs: ScratchpadPrefs,
+    /// Snapshot of the GUI's pane order, written back unchanged for the
+    /// same reason as `panel_vis`.
+    pane_order: Vec<String>,
     save_path: PathBuf,
     printer: SharedPrinter,
     /// Shared recall state. After adding a bookmark we stash the current input
@@ -494,6 +504,9 @@ impl ConditionalEventHandler for BookmarkHandler {
                         self.cmd_history,
                         self.appearance,
                         &self.clipboard,
+                        &self.scratchpad,
+                        self.scratchpad_prefs,
+                        &self.pane_order,
                         &self.save_path,
                     )
                 {
@@ -759,6 +772,9 @@ fn main() {
             cmd_history: state.cmd_history,
             appearance: state.appearance,
             clipboard: state.clipboard.clone(),
+            scratchpad: state.scratchpad.clone(),
+            scratchpad_prefs: state.scratchpad_prefs,
+            pane_order: state.pane_order.clone(),
             save_path: state_path.clone(),
             printer: printer.clone(),
         })),

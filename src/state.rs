@@ -81,6 +81,15 @@ pub struct State {
     /// GUI clipboard history, newest first. Held only to round-trip the
     /// `CLIP` lines, like `font_size`.
     pub clipboard: Vec<ClipboardEntry>,
+    /// GUI scratchpad text. Held only to round-trip the `SCRATCHPAD` line,
+    /// like `font_size`.
+    pub scratchpad: String,
+    /// GUI scratchpad settings. Held only to round-trip the
+    /// `SCRATCHPAD_PREFS` line, like `font_size`.
+    pub scratchpad_prefs: ScratchpadPrefs,
+    /// GUI pane order. Held only to round-trip the `PANE_ORDER` line, like
+    /// `font_size`.
+    pub pane_order: Vec<String>,
     /// Cached git branch for `cwd`. `None` when cwd isn't inside a repo.
     /// Refreshed by `refresh_branch` after every command and after `cd` —
     /// branch can change behind our back via `git checkout`, so we re-check
@@ -121,6 +130,9 @@ impl Default for State {
             cmd_history: CmdHistoryPrefs::default(),
             appearance: Appearance::default(),
             clipboard: Vec::new(),
+            scratchpad: String::new(),
+            scratchpad_prefs: ScratchpadPrefs::default(),
+            pane_order: Vec::new(),
             branch,
             active_remote: None,
         }
@@ -239,6 +251,9 @@ impl State {
             self.cmd_history,
             self.appearance,
             &self.clipboard,
+            &self.scratchpad,
+            self.scratchpad_prefs,
+            &self.pane_order,
             path,
         )
     }
@@ -272,6 +287,9 @@ impl State {
             cmd_history: loaded.cmd_history,
             appearance: loaded.appearance,
             clipboard: loaded.clipboard,
+            scratchpad: loaded.scratchpad,
+            scratchpad_prefs: loaded.scratchpad_prefs,
+            pane_order: loaded.pane_order,
             branch,
             active_remote: None,
         })
@@ -331,6 +349,10 @@ pub struct PanelVis {
     pub path_editor: bool,
     /// `peregrine`'s clipboard history panel.
     pub clipboard: bool,
+    /// `peregrine`'s scratchpad window.
+    pub scratchpad: bool,
+    /// `peregrine`'s terminal output and input.
+    pub terminal: bool,
 }
 
 impl Default for PanelVis {
@@ -344,6 +366,8 @@ impl Default for PanelVis {
             file_browser: true,
             path_editor: false,
             clipboard: false,
+            scratchpad: false,
+            terminal: true,
         }
     }
 }
@@ -443,6 +467,7 @@ pub struct PanelWidths {
     pub remote_terminals: Option<f32>,
     pub file_browser: Option<f32>,
     pub path_editor: Option<f32>,
+    pub scratchpad: Option<f32>,
 }
 
 /// GUI Files-panel toggles, as the user last left them: whether entries with
@@ -479,6 +504,45 @@ pub struct PaneSplits {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CmdHistoryPrefs {
     pub show_dir: Option<bool>,
+}
+
+/// What Tab does in the GUI's scratchpad.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScratchpadTab {
+    /// Inserts a tab character.
+    #[default]
+    Tab,
+    /// Inserts 4 spaces.
+    Spaces,
+    /// Moves the keyboard to the CLI input, as Tab does elsewhere in the GUI.
+    FocusTerm,
+}
+
+impl ScratchpadTab {
+    /// The name the state file stores it under.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Tab => "tab",
+            Self::Spaces => "spaces",
+            Self::FocusTerm => "focus_term",
+        }
+    }
+
+    /// The mode stored as `key` (see [Self::key]), if any.
+    pub fn from_key(key: &str) -> Option<Self> {
+        [Self::Tab, Self::Spaces, Self::FocusTerm]
+            .into_iter()
+            .find(|s| s.key() == key)
+    }
+}
+
+/// GUI scratchpad settings, as the user last left them: what Tab does in it
+/// (`tab`). `None` when the state file has no value for one, in which case
+/// the GUI uses its default. Like [PanelWidths], the CLI never reads these —
+/// they live here only so a CLI-side save round-trips the GUI's values.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ScratchpadPrefs {
+    pub tab: Option<ScratchpadTab>,
 }
 
 /// GUI appearance, as the user last left it: whether the window is dark

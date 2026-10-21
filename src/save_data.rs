@@ -10,7 +10,8 @@
 //!
 //! CLIP (the GUI's clipboard history) also uses TAB separators, but its
 //! fields are escaped rather than flattened (see [escape_field]), so copied
-//! text comes back with its newlines and tabs intact.
+//! text comes back with its newlines and tabs intact. SCRATCHPAD (the GUI's
+//! scratchpad text) is one such field on a line of its own.
 //!
 //! Timestamps are written as second-precision RFC 3339 (e.g.
 //! `2026-06-23T13:41:32Z`) to keep rows compact.
@@ -29,9 +30,9 @@ use std::{
 use chrono::{DateTime, SecondsFormat, Utc};
 
 use crate::state::{
-    Appearance, BookmarkSort, BookmarkView, ClipboardContent, ClipboardEntry, CmdHistoryPrefs, DirLabelLens, FilesPanelPrefs, FontSizes, HistoryItem, OpenTabs, PaneSplits, PanelVis,
-    PanelWidths,
-    RecentDir, RemoteTerminal, WindowSize,
+    Appearance, BookmarkSort, BookmarkView, ClipboardContent, ClipboardEntry, CmdHistoryPrefs,
+    DirLabelLens, FilesPanelPrefs, FontSizes, HistoryItem, OpenTabs, PaneSplits, PanelVis,
+    PanelWidths, RecentDir, RemoteTerminal, ScratchpadPrefs, ScratchpadTab, WindowSize,
 };
 
 pub const FILENAME: &str = "shell_state.ss";
@@ -55,6 +56,9 @@ const CMD_HISTORY_TAG: &str = "CMD_HISTORY ";
 const APPEARANCE_TAG: &str = "APPEARANCE ";
 const CLONE_ROOT_TAG: &str = "CLONE_ROOT ";
 const CLIPBOARD_TAG: &str = "CLIP ";
+const SCRATCHPAD_TAG: &str = "SCRATCHPAD ";
+const SCRATCHPAD_PREFS_TAG: &str = "SCRATCHPAD_PREFS ";
+const PANE_ORDER_TAG: &str = "PANE_ORDER ";
 
 /// Bundle of everything `load_state` returns. Lets callers destructure
 /// in one step and lets us grow the format without churning every call
@@ -106,6 +110,16 @@ pub struct LoadedState {
     /// The GUI's clipboard history, newest first. Empty when the file has
     /// no `CLIP` lines.
     pub clipboard: Vec<ClipboardEntry>,
+    /// The GUI's scratchpad text. Empty when the file has no `SCRATCHPAD`
+    /// line.
+    pub scratchpad: String,
+    /// GUI scratchpad settings. Each is `None` when the `SCRATCHPAD_PREFS`
+    /// line lacks it, as with `font_size`.
+    pub scratchpad_prefs: ScratchpadPrefs,
+    /// The GUI's panes, left to right, by their PANEL_VIS keys. Empty when
+    /// the file has no `PANE_ORDER` line, in which case the GUI uses its
+    /// default order.
+    pub pane_order: Vec<String>,
 }
 
 /// Where the state file lives by default: `<home>/shell_state.ss`. Falls back
@@ -136,6 +150,9 @@ pub fn save_state(
     cmd_history: CmdHistoryPrefs,
     appearance: Appearance,
     clipboard: &[ClipboardEntry],
+    scratchpad: &str,
+    scratchpad_prefs: ScratchpadPrefs,
+    pane_order: &[String],
     path: &Path,
 ) -> io::Result<()> {
     if let Some(parent) = path.parent()
@@ -190,7 +207,7 @@ pub fn save_state(
     // are skipped on load; missing keys keep their default value.
     writeln!(
         f,
-        "{PANEL_VIS_TAG}bookmarks={} recent_dirs={} recent_cmds={} recent_cmds_in_dir={} remote_terminals={} file_browser={} path_editor={} clipboard={}",
+        "{PANEL_VIS_TAG}bookmarks={} recent_dirs={} recent_cmds={} recent_cmds_in_dir={} remote_terminals={} file_browser={} path_editor={} clipboard={} scratchpad={} terminal={}",
         bool_to_int(panel_vis.bookmarks),
         bool_to_int(panel_vis.recent_dirs),
         bool_to_int(panel_vis.recent_cmds),
@@ -199,6 +216,8 @@ pub fn save_state(
         bool_to_int(panel_vis.file_browser),
         bool_to_int(panel_vis.path_editor),
         bool_to_int(panel_vis.clipboard),
+        bool_to_int(panel_vis.scratchpad),
+        bool_to_int(panel_vis.terminal),
     )?;
 
     // GUI-only. Written only when present so a CLI-side save
@@ -259,6 +278,7 @@ pub fn save_state(
         ("remote_terminals", panel_widths.remote_terminals),
         ("file_browser", panel_widths.file_browser),
         ("path_editor", panel_widths.path_editor),
+        ("scratchpad", panel_widths.scratchpad),
     ];
     let pairs: Vec<String> = widths
         .iter()
@@ -266,6 +286,12 @@ pub fn save_state(
         .collect();
     if !pairs.is_empty() {
         writeln!(f, "{PANEL_WIDTH_TAG}{}", pairs.join(" "))?;
+    }
+
+    // PaneOrder: GUI-only, written only when present, like FONT_SIZE.
+    // Space-separated keys, left to right, matching PANEL_VIS.
+    if !pane_order.is_empty() {
+        writeln!(f, "{PANE_ORDER_TAG}{}", pane_order.join(" "))?;
     }
 
     // FilesPanel: GUI-only, written only when present, like FONT_SIZE.
@@ -327,6 +353,18 @@ pub fn save_state(
 
     for root in clone_roots {
         writeln!(f, "{CLONE_ROOT_TAG}{}", sanitize_field(root))?;
+    }
+
+    // Scratchpad: GUI-only, escaped like CLIP so its newlines and tabs come
+    // back. Written only when there's text.
+    if !scratchpad.is_empty() {
+        writeln!(f, "{SCRATCHPAD_TAG}{}", escape_field(scratchpad))?;
+    }
+
+    // ScratchpadPrefs: GUI-only, written only when present, like FONT_SIZE.
+    // `key=value` pairs, like PANEL_VIS.
+    if let Some(tab) = scratchpad_prefs.tab {
+        writeln!(f, "{SCRATCHPAD_PREFS_TAG}tab={}", tab.key())?;
     }
 
     // Clipboard: GUI-only, newest first. Last, since entries can be long.
@@ -420,6 +458,9 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
                 cmd_history: CmdHistoryPrefs::default(),
                 appearance: Appearance::default(),
                 clipboard: Vec::new(),
+                scratchpad: String::new(),
+                scratchpad_prefs: ScratchpadPrefs::default(),
+                pane_order: Vec::new(),
             });
         }
         Err(e) => return Err(e),
@@ -442,6 +483,9 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
     let mut cmd_history = CmdHistoryPrefs::default();
     let mut appearance = Appearance::default();
     let mut clipboard = Vec::new();
+    let mut scratchpad = String::new();
+    let mut scratchpad_prefs = ScratchpadPrefs::default();
+    let mut pane_order = Vec::new();
 
     for line in BufReader::new(file).lines() {
         let line = line?;
@@ -521,6 +565,8 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
                     "file_browser" => panel_vis.file_browser = on,
                     "path_editor" => panel_vis.path_editor = on,
                     "clipboard" => panel_vis.clipboard = on,
+                    "scratchpad" => panel_vis.scratchpad = on,
+                    "terminal" => panel_vis.terminal = on,
                     _ => {}
                 }
             }
@@ -629,6 +675,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
                     "remote_terminals" => panel_widths.remote_terminals = w,
                     "file_browser" => panel_widths.file_browser = w,
                     "path_editor" => panel_widths.path_editor = w,
+                    "scratchpad" => panel_widths.scratchpad = w,
                     _ => {}
                 }
             }
@@ -726,6 +773,28 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
             }
             continue;
         }
+        if let Some(rest) = trimmed.strip_prefix(SCRATCHPAD_TAG) {
+            scratchpad = unescape_field(rest.trim_end_matches('\r'));
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix(SCRATCHPAD_PREFS_TAG) {
+            // Parse `tab=<mode>`, like CMD_HISTORY. An unknown mode leaves it
+            // at `None` (the GUI's default).
+            for pair in rest.split_whitespace() {
+                let Some((k, v)) = pair.split_once('=') else {
+                    continue;
+                };
+                if k == "tab" {
+                    scratchpad_prefs.tab = ScratchpadTab::from_key(v);
+                }
+            }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix(PANE_ORDER_TAG) {
+            // The GUI checks the keys; unknown ones are its to skip.
+            pane_order = rest.split_whitespace().map(str::to_string).collect();
+            continue;
+        }
         if let Some(rest) = trimmed.strip_prefix(CLIPBOARD_TAG) {
             // `<dt>\ttext\t<text>` or `<dt>\tcopy|cut\t<path>...`, each field
             // escaped. A malformed line, or a file entry without paths, is
@@ -735,7 +804,9 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
                 && let Ok(dt) = DateTime::parse_from_rfc3339(dt_str)
             {
                 let content = match kind {
-                    "text" => parts.next().map(|t| ClipboardContent::Text(unescape_field(t))),
+                    "text" => parts
+                        .next()
+                        .map(|t| ClipboardContent::Text(unescape_field(t))),
                     "copy" | "cut" => {
                         let paths: Vec<PathBuf> =
                             parts.map(|p| PathBuf::from(unescape_field(p))).collect();
@@ -777,6 +848,9 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
         cmd_history,
         appearance,
         clipboard,
+        scratchpad,
+        scratchpad_prefs,
+        pane_order,
     })
 }
 
@@ -808,6 +882,9 @@ mod tests {
             PaneSplits::default(),
             CmdHistoryPrefs::default(),
             Appearance::default(),
+            &[],
+            "",
+            ScratchpadPrefs::default(),
             &[],
             &path,
         )
@@ -848,6 +925,9 @@ mod tests {
                 PaneSplits::default(),
                 CmdHistoryPrefs::default(),
                 Appearance::default(),
+                &[],
+                "",
+                ScratchpadPrefs::default(),
                 &[],
                 &path,
             )
@@ -895,6 +975,9 @@ mod tests {
                 CmdHistoryPrefs::default(),
                 Appearance::default(),
                 &[],
+                "",
+                ScratchpadPrefs::default(),
+                &[],
                 &path,
             )
             .unwrap();
@@ -920,6 +1003,7 @@ mod tests {
                 remote_terminals: Some(90.0),
                 file_browser: Some(410.75),
                 path_editor: Some(260.0),
+                scratchpad: Some(320.0),
             },
         ] {
             save_state(
@@ -939,6 +1023,9 @@ mod tests {
                 PaneSplits::default(),
                 CmdHistoryPrefs::default(),
                 Appearance::default(),
+                &[],
+                "",
+                ScratchpadPrefs::default(),
                 &[],
                 &path,
             )
@@ -981,6 +1068,9 @@ mod tests {
                 CmdHistoryPrefs::default(),
                 Appearance::default(),
                 &[],
+                "",
+                ScratchpadPrefs::default(),
+                &[],
                 &path,
             )
             .unwrap();
@@ -1021,6 +1111,9 @@ mod tests {
                 CmdHistoryPrefs::default(),
                 Appearance::default(),
                 &[],
+                "",
+                ScratchpadPrefs::default(),
+                &[],
                 &path,
             )
             .unwrap();
@@ -1029,7 +1122,10 @@ mod tests {
 
         // Out-of-range fractions are dropped rather than adopted.
         fs::write(&path, "PANE_SPLIT files=1.5 path=0 junk\n").unwrap();
-        assert_eq!(load_state(&path).unwrap().pane_splits, PaneSplits::default());
+        assert_eq!(
+            load_state(&path).unwrap().pane_splits,
+            PaneSplits::default()
+        );
         let _ = fs::remove_file(&path);
     }
 
@@ -1062,6 +1158,9 @@ mod tests {
                 PaneSplits::default(),
                 prefs,
                 Appearance::default(),
+                &[],
+                "",
+                ScratchpadPrefs::default(),
                 &[],
                 &path,
             )
@@ -1107,6 +1206,9 @@ mod tests {
                 CmdHistoryPrefs::default(),
                 appearance,
                 &[],
+                "",
+                ScratchpadPrefs::default(),
+                &[],
                 &path,
             )
             .unwrap();
@@ -1128,7 +1230,10 @@ mod tests {
             },
             ClipboardEntry {
                 content: ClipboardContent::Files {
-                    paths: vec![PathBuf::from(r"C:\Users\a b\x.txt"), PathBuf::from("/tmp/y")],
+                    paths: vec![
+                        PathBuf::from(r"C:\Users\a b\x.txt"),
+                        PathBuf::from("/tmp/y"),
+                    ],
                     cut: true,
                 },
                 added: at("2026-10-14T23:59:59Z"),
@@ -1159,6 +1264,9 @@ mod tests {
             CmdHistoryPrefs::default(),
             Appearance::default(),
             &entries,
+            "",
+            ScratchpadPrefs::default(),
+            &[],
             &path,
         )
         .unwrap();
@@ -1171,6 +1279,129 @@ mod tests {
         )
         .unwrap();
         assert!(load_state(&path).unwrap().clipboard.is_empty());
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn scratchpad_round_trip() {
+        let path = std::env::temp_dir().join("shell_save_data_test_scratchpad.ss");
+        for text in ["", "one line", "  lead\tand tab\nsecond \\n line\r\n\n"] {
+            save_state(
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &PanelVis::default(),
+                None,
+                &OpenTabs::default(),
+                FontSizes::default(),
+                DirLabelLens::default(),
+                &BookmarkView::default(),
+                PanelWidths::default(),
+                FilesPanelPrefs::default(),
+                PaneSplits::default(),
+                CmdHistoryPrefs::default(),
+                Appearance::default(),
+                &[],
+                text,
+                ScratchpadPrefs::default(),
+                &[],
+                &path,
+            )
+            .unwrap();
+            assert_eq!(load_state(&path).unwrap().scratchpad, text);
+        }
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn scratchpad_prefs_round_trip() {
+        let path = std::env::temp_dir().join("shell_save_data_test_scratchpad_prefs.ss");
+        let tabs = [
+            ScratchpadTab::Tab,
+            ScratchpadTab::Spaces,
+            ScratchpadTab::FocusTerm,
+        ];
+        for prefs in [ScratchpadPrefs::default()]
+            .into_iter()
+            .chain(tabs.map(|tab| ScratchpadPrefs { tab: Some(tab) }))
+        {
+            save_state(
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &PanelVis::default(),
+                None,
+                &OpenTabs::default(),
+                FontSizes::default(),
+                DirLabelLens::default(),
+                &BookmarkView::default(),
+                PanelWidths::default(),
+                FilesPanelPrefs::default(),
+                PaneSplits::default(),
+                CmdHistoryPrefs::default(),
+                Appearance::default(),
+                &[],
+                "",
+                prefs,
+                &[],
+                &path,
+            )
+            .unwrap();
+            assert_eq!(load_state(&path).unwrap().scratchpad_prefs, prefs);
+        }
+
+        // An unknown mode is dropped rather than failing the load.
+        fs::write(&path, "SCRATCHPAD_PREFS tab=sideways\n").unwrap();
+        assert_eq!(load_state(&path).unwrap().scratchpad_prefs.tab, None);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn pane_order_and_terminal_vis_round_trip() {
+        let path = std::env::temp_dir().join("shell_save_data_test_pane_order.ss");
+        let orders: [Vec<String>; 2] = [
+            Vec::new(),
+            ["terminal", "clipboard", "bookmarks"]
+                .map(String::from)
+                .to_vec(),
+        ];
+        for (order, terminal) in orders.iter().zip([true, false]) {
+            let vis = PanelVis {
+                terminal,
+                ..Default::default()
+            };
+            save_state(
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                &vis,
+                None,
+                &OpenTabs::default(),
+                FontSizes::default(),
+                DirLabelLens::default(),
+                &BookmarkView::default(),
+                PanelWidths::default(),
+                FilesPanelPrefs::default(),
+                PaneSplits::default(),
+                CmdHistoryPrefs::default(),
+                Appearance::default(),
+                &[],
+                "",
+                ScratchpadPrefs::default(),
+                order,
+                &path,
+            )
+            .unwrap();
+            let loaded = load_state(&path).unwrap();
+            assert_eq!(&loaded.pane_order, order);
+            assert_eq!(loaded.panel_vis.terminal, terminal);
+        }
         let _ = fs::remove_file(&path);
     }
 
@@ -1207,6 +1438,9 @@ mod tests {
                 CmdHistoryPrefs::default(),
                 Appearance::default(),
                 &[],
+                "",
+                ScratchpadPrefs::default(),
+                &[],
                 &path,
             )
             .unwrap();
@@ -1217,8 +1451,12 @@ mod tests {
         }
 
         // An unknown mode is dropped rather than failing the load.
-        fs::write(&path, "BM_SORT sideways
-").unwrap();
+        fs::write(
+            &path,
+            "BM_SORT sideways
+",
+        )
+        .unwrap();
         assert_eq!(load_state(&path).unwrap().bookmark_view.sort, None);
         let _ = fs::remove_file(&path);
     }

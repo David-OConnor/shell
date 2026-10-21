@@ -239,29 +239,29 @@ Knowing when each command finishes relies on a small prompt hook installed in th
 
 
 ## Key commands
-- Enter key: Send input
-- ↑ / ↓: Walk through previously-entered history items (across all directories)   and load each into the input. Replaces the OS shell's default history   behavior. A green ` his N` indicator next to the prompt shows the current
+- **Enter**: Send input
+- **↑** / ↓: Walk through previously-entered history items (across all directories)   and load each into the input. Replaces the OS shell's default history   behavior. A green ` his N` indicator next to the prompt shows the current
   item — e.g. `S <cwd> his 29 $ ...`. Fish-style prefix search: if you've already typed something, ↑ walks only the history entries that start with it (e.g. type `git` then ↑ to step through past `git` commands); with an empty
   input it walks everything.
-- ← / →: Walk through recent directories. Each step loads `cd <path>` into
+- **←** / **→**: Walk through recent directories. Each step loads `cd <path>` into
   the input and shows a green ` cd N` indicator next to the prompt; Enter
   goes there. Left/Right still move the caret when the input has text and
   no cd recall is active.
-- Tab key: while using with cd, autocompletes, including to bookmarks.
+- **Tab**: while using with cd, autocompletes, including to bookmarks.
 
 
 ### Recent or frequent commands
-- Ctrl + B: Bookmark the current directory.
-- Ctrl + 2: List the most recent directories a command has been executed from.
-- Ctrl + 3: List the most recent commands executed.
-- Ctrl + 4: List commands entered in the current directory.
-- Ctrl + 5: List saved SSH remotes.
+- **Ctrl + B**: Bookmark the current directory.
+- **Ctrl + 2**: List the most recent directories a comm1and has been executed from.
+- **Ctrl + 3**: List the most recent commands executed.
+- **Ctrl + 4**: List commands entered in the current directory.
+- **Ctrl + 5**: List saved SSH remotes.
 
-- Ctrl + 1: List all bookmarks.
-- Ctrl + D: Exit
+- **Ctrl + 1**: List all bookmarks.
+- **Ctrl + D**: Exit
 
-Note: Ctrl + 1–5 work in the Windows terminal via the bundled line editor.
-Most Unix terminals cannot transmit Ctrl + digit; use the typed commands there.
+Note: **Ctrl + 1–5** work in the Windows terminal via the bundled line editor.
+Most Unix terminals cannot transmit **Ctrl + digit**; use the typed commands there.
 
 These lists are paginated (newest items first). Press the same keystroke again
 to step to the next (older) page, wrapping back to the first page after the
@@ -271,21 +271,21 @@ last. For history, `his p<number>` or `this p<number>` jumps straight to a page.
 ### General terminal commands
 Standard line-editing shortcuts, provided by the underlying line editor:
 
-- Ctrl + A / Home: Move the cursor to the start of the line.
-- Ctrl + E / End: Move the cursor to the end of the line.
-- Ctrl + ← / Ctrl + →: Move the cursor back / forward one word.
-- Ctrl + W: Delete the word before the cursor.
-- Alt + D: Delete the word after the cursor.
-- Ctrl + K: Delete from the cursor to the end of the line.
-- Ctrl + U: Delete from the cursor to the start of the line.
-- Ctrl + Y: Paste the last deleted text.
-- Ctrl + T: Swap the two characters around the cursor. Alt + T swaps words.
-- Alt + C / Alt + U / Alt + L: Capitalize / uppercase / lowercase the word at the cursor.
-- Ctrl + _: Undo.
-- Ctrl + L: Clear the screen.
-- Ctrl + N / Ctrl + P: Next / previous history entry.
-- Ctrl + C: Cancel the current input.
-- Ctrl + D: Exit (on an empty line); delete the character under the cursor otherwise.
+- **Ctrl + A** / **Home**: Move the cursor to the start of the line.
+- **Ctrl + E** / **End**: Move the cursor to the end of the line.
+- **Ctrl + ←** / **Ctrl +** →: Move the cursor back / forward one word.
+- **Ctrl + W**: Delete the word before the cursor.
+- **Alt + D**: Delete the word after the cursor.
+- **Ctrl + K**: Delete from the cursor to the end of the line.
+- **Ctrl + U**: Delete from the cursor to the start of the line.
+- **Ctrl + Y**: Paste the last deleted text.
+- **Ctrl + T**: Swap the two characters around the cursor. Alt + T swaps words.
+- **Alt + C** / **Alt + U** / **Alt + L**: Capitalize / uppercase / lowercase the word at the cursor.
+- **Ctrl + _**: Undo.
+- **Ctrl + L**: Clear the screen.
+- **Ctrl + N** / Ctrl + P: Next / previous history entry.
+- **Ctrl + C**: Cancel the current input.
+- **Ctrl + D**: Exit (on an empty line); delete the character under the cursor otherwise.
 
 
 

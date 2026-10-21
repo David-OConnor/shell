@@ -369,9 +369,7 @@ pub fn complete_clone_url(line: &str, pos: usize, roots: &[String]) -> Option<Co
 
     let before = &line[..pos];
     // The word the cursor sits at the end of; empty right after a space.
-    let word_start = before
-        .trim_end_matches(|c: char| !c.is_whitespace())
-        .len();
+    let word_start = before.trim_end_matches(|c: char| !c.is_whitespace()).len();
     let word = &before[word_start..];
     let prior: Vec<&str> = before[..word_start].split_whitespace().collect();
     if word.starts_with('-') || git::clone_repo_index(&prior) != Some(prior.len()) {
