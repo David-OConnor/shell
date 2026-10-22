@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{RecentDir, git, util};
+use crate::{RecentDir, common_dirs::common_dirs, git, util};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompletionResult {
@@ -50,7 +50,8 @@ pub fn apply_completion(line: &str, pos: usize, completion: &CompletionResult) -
 /// Shared `cd` autocomplete used by both the CLI and GUI frontends. It
 /// completes bookmarked directory names first, then directory entries on disk
 /// (including nested relative paths like `code/Bi`), then recent directories,
-/// then directories nested anywhere under a bookmark.
+/// then directories nested anywhere under a bookmark, then the OS's standard
+/// directories (see [common_dirs]).
 pub fn complete_cd_path(
     line: &str,
     pos: usize,
@@ -96,6 +97,10 @@ pub fn complete_cd_path(
     let bare_name = !arg.is_empty() && !arg.starts_with('~') && !arg.contains(['/', '\\']);
     if bare_name && !sources.iter().flatten().any(|(score, _)| *score == 0) {
         sources.push(complete_bookmark_descendants(arg, home, bookmarks));
+    }
+    // Last, so anything of the user's own wins a tie with e.g. `/etc`.
+    if bare_name {
+        sources.push(complete_common_dirs(arg, home));
     }
 
     let candidates = (0..=2)
@@ -204,6 +209,59 @@ fn complete_bookmarks(
         .collect();
     sort_scored(&mut scored);
     scored
+}
+
+/// Complete against the OS's standard directories by name, e.g. `cd program f`
+/// → `C:\Program Files`. Shows full paths, as names like `Local` or `log`
+/// say little on their own.
+fn complete_common_dirs(arg: &str, home: Option<&Path>) -> Vec<(u32, CompletionCandidate)> {
+    let mut scored: Vec<(u32, CompletionCandidate)> = common_dirs(home)
+        .iter()
+        .filter_map(|p| {
+            let score = match_score(arg, p.file_name()?.to_str()?)?;
+            let replacement = util::render_with_tilde(p, home);
+            Some((
+                score,
+                CompletionCandidate {
+                    display: replacement.clone(),
+                    replacement,
+                },
+            ))
+        })
+        .collect();
+    sort_scored(&mut scored);
+    scored
+}
+
+#[cfg(test)]
+mod common_completion_tests {
+    use super::*;
+
+    /// No bookmarks or recent dirs, and nothing matching in the cwd.
+    fn complete_from_nowhere(line: &str) -> Vec<String> {
+        let cwd = std::env::temp_dir().join("shell_completion_test_common");
+        fs::create_dir_all(&cwd).unwrap();
+        let result = complete_cd_path(line, line.len(), &cwd, None, &[], &[]).unwrap();
+        result
+            .candidates
+            .into_iter()
+            .map(|c| c.replacement)
+            .collect()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn tab_completes_program_files() {
+        let program_files = std::env::var("ProgramFiles").unwrap();
+        let candidates = complete_from_nowhere("cd program f");
+        assert_eq!(candidates.first(), Some(&program_files));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tab_completes_etc() {
+        assert_eq!(complete_from_nowhere("cd etc"), vec!["/etc".to_string()]);
+    }
 }
 
 /// How many levels below each bookmark [complete_bookmark_descendants] looks.

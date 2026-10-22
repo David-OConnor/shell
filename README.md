@@ -39,6 +39,7 @@ somewhere convenient, and add it to the system path; then you can launch by typi
 - Ctrl + 2: Show recent directories
 - `cd <number>` (e.g. `cd 2`): Go to this number in the recent directories
 - `cd <a few letters>` to go to a recent directory that contains these letters
+- `cd <a few letters>` also reaches the OS's standard directories by name, with nothing saved: e.g. `cd program f` → `C:\Program Files`, `cd etc` → `/etc`
 
 - Ctrl + 3: Show command history. Press again to page through older entries
 - `his <number>` (e.g. `his 2`): Go to this number in the history
@@ -55,7 +56,7 @@ somewhere convenient, and add it to the system path; then you can launch by typi
 - `ssh 2` Go to #2 on the remotes list
 - `cd cod` + Tab: Go to a bookmark or recent directory that contains these letters, e.g ~/code
 
-- `pull`, `push`, `branch`, `commit`, `checkout`, `clone`: Shorthand for `git pull`, `git push`, etc.
+- `pull`, `push`, `branch`, `commit`, `checkout`, `clone`, `stash`: Shorthand for `git pull`, `git push`, etc.
 - `clone <name>`: After one clone by full URL, e.g. `clone https://github.com/david-oconnor/shell`, clone
   other repos from the same place by name: `clone lin_alg`.
 - `run`, `build`, `fmt`: Shorthand for `cargo run`, `cargo build`, `cargo +nightly fmt`. `run release` runs `cargo run --release`.
@@ -85,7 +86,14 @@ As you type, Shell shows a dimmed (grey) suggestion after the cursor: the most r
 
 
 ### Tab completion
-Tab completes the `cd` argument against your bookmarks first, then directories on disk (including nested paths like `code/Bi`), then recent directories, then directories nested anywhere under a bookmark (up to 4 levels deep). For example, with `~/code/Bio` bookmarked, `cd plasc` + Tab completes to `~/code/Bio/plascad` from any directory. After `clone`, Tab completes a repo name to its full URL; see [Cloning from common roots](#cloning-from-common-roots). Other commands fall back to filename completion in the current directory.
+Tab completes the `cd` argument against your bookmarks first, then directories on disk (including nested paths like `code/Bi`), then recent directories, then directories nested anywhere under a bookmark (up to 4 levels deep), then the OS's standard directories. For example, with `~/code/Bio` bookmarked, `cd plasc` + Tab completes to `~/code/Bio/plascad` from any directory.
+
+The standard directories, where they exist:
+- **Windows**: `~/Desktop`, `Documents`, `Downloads`, `Pictures`, `Music`, `Videos` (or their OneDrive copies), `~/AppData` and its `Local` and `Roaming`, `~/.ssh`, `C:\Program Files`, `C:\Program Files (x86)`, `C:\ProgramData`, `C:\Users`, `C:\Windows`, `C:\Windows\System32`, and Temp
+- **Linux**: the same home folders, `~/.config`, `~/.local/share`, `~/.cache`, `~/.ssh`, `/etc`, `/etc/systemd/system`, `/opt`, `/usr`, `/usr/local`, `/usr/share`, `/var`, `/var/log`, `/var/www`, `/srv`, `/mnt`, `/media`, `/home`, `/boot`, `/tmp`
+- **macOS**: the same home folders (`Movies` for `Videos`), `~/Library` and its `Application Support`, `LaunchAgents` and `Logs`, `~/.config`, `~/.ssh`, `/Applications`, `/Library`, `/System`, `/Users`, `/Volumes`, `/opt`, `/opt/homebrew`, `/usr/local`, `/etc`, `/var/log`, `/tmp`
+
+After `clone`, Tab completes a repo name to its full URL; see [Cloning from common roots](#cloning-from-common-roots). Other commands fall back to filename completion in the current directory.
 
 
 ## Syntax highlighting
@@ -108,7 +116,7 @@ sync A commit message
 
 Warning: This isn't suitable for all workflows. If you use git in a way where it isn't appropriate to sync all gitignored files, this may have unintended consequences!
 
-`pull`, `push`, `branch`, `commit`, `checkout`, and `clone` are shorthand for the `git` command of the same name. Any
+`pull`, `push`, `branch`, `commit`, `checkout`, `clone`, and `stash` are shorthand for the `git` command of the same name. Any
 arguments are passed through unchanged:
 
 ```shell
@@ -116,6 +124,7 @@ pull                     // git pull
 push origin main         // git push origin main
 branch -a                // git branch -a
 commit -m "A message"    // git commit -m "A message"
+stash pop                // git stash pop
 ```
 
 ### Cloning from common roots
@@ -194,7 +203,7 @@ Run `logs <service>`, to view the recent Journalctl logs. Linux only. For exampl
 - `shelp`: List every command and key shortcut, one per line.
 - `exit` or `quit`: Exit the program.
 - `sync`: Run `git add .`, `git commit -am <the commit message>`, and `git push`.
-- `pull`, `push`, `branch`, `commit`, `checkout`, and `clone`: Aliases for `git pull`, `git push`, etc.
+- `pull`, `push`, `branch`, `commit`, `checkout`, `clone`, and `stash`: Aliases for `git pull`, `git push`, etc.
 - `clone <name>`: Clone a repo by name, from the root of the last repo you cloned by full URL.
 - `run`, `build`, and `fmt`: Aliases for `cargo run`, `cargo build`, and `cargo +nightly fmt`. `run release` runs `cargo run --release`.
 - `rm_targets`: Find cargo `target` folders under the current directory, list them with their sizes in GB, show the total that would be freed, and delete them after you confirm.
@@ -212,7 +221,7 @@ also works on Windows.
 - `cd <number>`: Go to this recent directory (as listed with Ctrl + 2). For bookmarks, use `bm <number>`.
 - `bm <number>`: Go to this bookmark (as listed with Ctrl + 1).
 - `bm <letters>`: Go to a bookmark whose path contains those letters.
-- `cd <letters>`: Go to a bookmarked or recent directory whose path contains those letters.
+- `cd <letters>`: Go to a bookmarked or recent directory whose path contains those letters, or else a standard directory (e.g. `/etc`, `C:\Program Files`) whose name does.
 - `cd <part-of-path>` + Tab key: Go to this directory history item
 
 

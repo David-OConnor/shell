@@ -10,7 +10,10 @@ use std::{
     process::Command,
 };
 
-use crate::state::{BrowserFile, HistoryItem, RecentDir};
+use crate::{
+    common_dirs::common_dirs,
+    state::{BrowserFile, HistoryItem, RecentDir},
+};
 
 /// Horizontal rule framing the paginated lists (history, recent dirs,
 /// bookmarks, remotes) in the CLI.
@@ -171,8 +174,23 @@ pub fn find_bookmark(bookmarks: &[PathBuf], query: &str) -> Option<PathBuf> {
     best_path_match(bookmarks.iter().map(PathBuf::as_path), query).map(Path::to_path_buf)
 }
 
-pub fn find_recent_dir(recent: &[RecentDir], query: &str) -> Option<PathBuf> {
-    best_path_match(recent.iter().map(|r| r.path.as_path()), query).map(Path::to_path_buf)
+/// Where `cd <query>` goes when `query` is neither a real directory nor a
+/// bookmark: a recent dir by name, then a standard directory by name (see
+/// [common_dirs]), then a recent dir with `query` anywhere in its path. A
+/// standard directory's name beats a recent dir matched only by its path, so
+/// `cd appdata` reaches `~/AppData` rather than some recent dir inside it.
+pub fn find_cd_fallback(recent: &[RecentDir], home: Option<&Path>, query: &str) -> Option<PathBuf> {
+    // Most recent first, so it wins ties.
+    let recent_hit = ranked_path_match(recent.iter().rev().map(|r| r.path.as_path()), query, true);
+    if let Some(((tier, _), p)) = recent_hit
+        && tier < PATH_TIER
+    {
+        return Some(p.to_path_buf());
+    }
+    let common = common_dirs(home);
+    ranked_path_match(common.iter().map(PathBuf::as_path), query, false)
+        .or(recent_hit)
+        .map(|(_, p)| p.to_path_buf())
 }
 
 /// A saved directory list a `cd` target can be picked from. When the target
@@ -290,9 +308,23 @@ fn best_path_match<'a>(
     paths: impl DoubleEndedIterator<Item = &'a Path>,
     query: &str,
 ) -> Option<&'a Path> {
+    ranked_path_match(paths.rev(), query, true).map(|(_, p)| p)
+}
+
+/// The [ranked_path_match] tier of a match found only in the full path, not
+/// the directory name.
+const PATH_TIER: u8 = 2;
+
+/// [best_path_match] with the winner's rank, `(tier, name length)`, lower
+/// being better. The full path is only searched when `whole_path` is set.
+/// Ties go to the first entry of `paths`.
+fn ranked_path_match<'a>(
+    paths: impl Iterator<Item = &'a Path>,
+    query: &str,
+    whole_path: bool,
+) -> Option<((u8, usize), &'a Path)> {
     let needle = query.to_lowercase();
     paths
-        .rev()
         .filter_map(|p| {
             let name = p
                 .file_name()
@@ -302,16 +334,61 @@ fn best_path_match<'a>(
                 (0, name.len())
             } else if name.contains(&needle) {
                 (1, name.len())
-            } else if p.to_string_lossy().to_lowercase().contains(&needle) {
-                (2, 0)
+            } else if whole_path && p.to_string_lossy().to_lowercase().contains(&needle) {
+                (PATH_TIER, 0)
             } else {
                 return None;
             };
             Some((rank, p))
         })
-        // `min_by_key` keeps the first of equal minimums: the latest entry.
+        // `min_by_key` keeps the first of equal minimums.
         .min_by_key(|(rank, _)| *rank)
-        .map(|(_, p)| p)
+}
+
+#[cfg(test)]
+mod cd_fallback_tests {
+    use chrono::Utc;
+
+    use super::*;
+
+    fn recent(path: PathBuf) -> RecentDir {
+        RecentDir {
+            path,
+            dt: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn standard_dir_name_beats_recent_path_match_only() {
+        let home = env::temp_dir().join("shell_cd_fallback_test_home");
+        fs::create_dir_all(home.join("Desktop")).unwrap();
+        let inside = || recent(home.join("Desktop").join("project"));
+        let named = recent(PathBuf::from("/elsewhere/desktop_notes"));
+        let path_only = find_cd_fallback(&[inside()], Some(&home), "desktop");
+        let by_name = find_cd_fallback(&[inside(), named], Some(&home), "desktop");
+        let _ = fs::remove_dir_all(&home);
+        assert_eq!(path_only, Some(home.join("Desktop")));
+        assert_eq!(by_name, Some(PathBuf::from("/elsewhere/desktop_notes")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn program_files_by_name() {
+        let program_files = PathBuf::from(env::var("ProgramFiles").unwrap());
+        assert_eq!(
+            find_cd_fallback(&[], None, "program f"),
+            Some(program_files)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn etc_by_name() {
+        assert_eq!(
+            find_cd_fallback(&[], None, "etc"),
+            Some(PathBuf::from("/etc"))
+        );
+    }
 }
 
 #[cfg(test)]

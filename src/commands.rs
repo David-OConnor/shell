@@ -23,7 +23,7 @@ use std::{
 };
 
 use crate::{
-    DirList, clone_root, expand_clone, find_bookmark, find_history_index, find_recent_dir,
+    DirList, clone_root, expand_clone, find_bookmark, find_cd_fallback, find_history_index,
     path_from_args, quiet_command, record_clone_root, remove_saved_dir, ssh, stale_dir_list,
     state::State,
     util::{confirm, render_with_tilde},
@@ -256,7 +256,9 @@ pub fn open_dir(dir: &Path, sink: OutputSink) {
 
 /// Bare commands that are shorthand for the `git` subcommand of the same name,
 /// e.g. `pull` runs `git pull`.
-pub const GIT_ALIASES: &[&str] = &["pull", "push", "branch", "commit", "checkout", "clone"];
+pub const GIT_ALIASES: &[&str] = &[
+    "pull", "push", "branch", "commit", "checkout", "clone", "stash",
+];
 
 /// Bare commands that are shorthand for a `cargo` command line, e.g. `run`
 /// runs `cargo run`.
@@ -662,7 +664,8 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
                 drop(bookmarks);
                 if !target.is_dir() && !args.is_empty() && !args.starts_with('~') {
                     if let Ok(recent) = state.recent_dirs.lock() {
-                        if let Some(found) = find_recent_dir(&recent, args) {
+                        if let Some(found) = find_cd_fallback(&recent, state.home.as_deref(), args)
+                        {
                             target = found;
                         }
                     }
@@ -941,7 +944,7 @@ pub fn shelp_text(frontend: Frontend) -> String {
             "`git add .`, then `git commit -am <message>`, then `git push`",
         ),
         (
-            "pull, push, branch, commit, checkout, clone",
+            "pull, push, branch, commit, checkout, clone, stash",
             "Shorthand for `git pull`, `git push`, etc. Arguments are passed through",
         ),
         (
@@ -1091,6 +1094,10 @@ mod tests {
         assert_eq!(
             expand_alias("clone", "shell").as_deref(),
             Some("git clone shell")
+        );
+        assert_eq!(
+            expand_alias("stash", "pop").as_deref(),
+            Some("git stash pop")
         );
         assert_eq!(expand_alias("run", "").as_deref(), Some("cargo run"));
         assert_eq!(
