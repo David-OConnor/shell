@@ -258,7 +258,7 @@ pub fn open_dir(dir: &Path, sink: OutputSink) {
 /// Bare commands that are shorthand for the `git` subcommand of the same name,
 /// e.g. `pull` runs `git pull`.
 pub const GIT_ALIASES: &[&str] = &[
-    "pull", "push", "branch", "commit", "checkout", "clone", "stash",
+    "pull", "push", "branch", "commit", "checkout", "switch", "clone", "stash",
 ];
 
 /// Bare commands that are shorthand for a `cargo` command line, e.g. `run`
@@ -948,7 +948,7 @@ pub fn shelp_text(frontend: Frontend) -> String {
             "`git add .`, then `git commit -am <message>`, then `git push`",
         ),
         (
-            "pull, push, branch, commit, checkout, clone, stash",
+            "pull, push, branch, commit, checkout, switch, clone, stash",
             "Shorthand for `git pull`, `git push`, etc. Arguments are passed through",
         ),
         (
@@ -1109,6 +1109,10 @@ mod tests {
         assert_eq!(
             expand_alias("stash", "pop").as_deref(),
             Some("git stash pop")
+        );
+        assert_eq!(
+            expand_alias("switch", "master").as_deref(),
+            Some("git switch master")
         );
         assert_eq!(expand_alias("run", "").as_deref(), Some("cargo run"));
         assert_eq!(

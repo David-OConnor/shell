@@ -99,6 +99,7 @@ const BUILTINS: &[&str] = &[
     "branch",
     "commit",
     "checkout",
+    "switch",
     "clone",
     "stash",
     "run",

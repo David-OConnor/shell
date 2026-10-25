@@ -203,7 +203,7 @@ Run `logs <service>`, to view the recent Journalctl logs. Linux only. For exampl
 - `shelp`: List every command and key shortcut, one per line.
 - `exit` or `quit`: Exit the program.
 - `sync`: Run `git add .`, `git commit -am <the commit message>`, and `git push`.
-- `pull`, `push`, `branch`, `commit`, `checkout`, `clone`, and `stash`: Aliases for `git pull`, `git push`, etc.
+- `pull`, `push`, `branch`, `commit`, `checkout`, `switch`, `clone`, and `stash`: Aliases for `git pull`, `git push`, etc.
 - `clone <name>`: Clone a repo by name, from the root of the last repo you cloned by full URL.
 - `run`, `build`, and `fmt`: Aliases for `cargo run`, `cargo build`, and `cargo +nightly fmt`. `run release` runs `cargo run --release`.
 - `rm_targets`: Find cargo `target` folders under the current directory, list them with their sizes in GB, show the total that would be freed, and delete them after you confirm.
