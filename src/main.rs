@@ -16,17 +16,15 @@ use std::{
 use rustyline::{
     Cmd, CompletionType, ConditionalEventHandler, Config, Context, Editor, Event, EventContext,
     EventHandler, ExternalPrinter, Helper, KeyCode, KeyEvent, Modifiers, RepeatCount,
-    completion::{Completer, FilenameCompleter, Pair},
+    completion::{Completer, Pair},
     error::ReadlineError,
-    hint::{Hinter, HistoryHinter},
+    hint::{Hint, Hinter},
     history::FileHistory,
     validate::Validator,
 };
 use shell::{
-    Appearance, BookmarkView, ClipboardEntry, CmdHistoryPrefs, DISP_PAGE_LEN, DirLabelLens,
-    FilesPanelPrefs, FontSizes, NavState, OpenTabs, PaneSplits, PanelVis, PanelWidths,
-    RemoteTerminal, ScratchpadPrefs, WindowSize, commands, complete_cd_path, complete_clone_url,
-    complete_command_path, page_count, save_data,
+    ClipboardEntry, CompletionSources, DISP_PAGE_LEN, HintCache, NavState, OpenTabs,
+    RemoteTerminal, commands, complete_input, page_count, save_data,
     state::{HistoryItem, RecentDir},
 };
 
@@ -43,7 +41,7 @@ const CD_PREFIX: &str = " cd ";
 use shell::state::State;
 pub use shell::{BRANCH_PREFIX, VENV_PREFIX};
 
-use crate::key_handling::ArrowHandler;
+use crate::key_handling::{ArrowHandler, HintHandler};
 
 /// Shared handle to rustyline's `ExternalPrinter`. Key handlers use this to
 /// print messages *above* the in-progress prompt line — going through
@@ -52,29 +50,23 @@ use crate::key_handling::ArrowHandler;
 /// because rustyline's cursor-tracking state never sees the write.
 type SharedPrinter = Arc<Mutex<Box<dyn ExternalPrinter + Send>>>;
 
-/// Rustyline `Helper` that provides Tab-completion for the `cd` builtin
-/// through the shared bookmark + filesystem completer, and for `clone`'s repo
-/// URL from the saved clone roots. Other commands fall back to rustyline's
-/// built-in filename completer.
+/// Rustyline `Helper` that provides Tab completion and the greyed
+/// suggestion through the shell lib's shared completer (see
+/// [complete_input], [shell::input_hint]), as Peregrine does.
 struct ShellHelper {
     bookmarks: Arc<Mutex<Vec<PathBuf>>>,
     recent_dirs: Arc<Mutex<Vec<RecentDir>>>,
     clone_roots: Arc<Mutex<Vec<String>>>,
+    /// The persisted command history, which suggestions are drawn from.
+    history: Arc<Mutex<Vec<HistoryItem>>>,
     home: Option<PathBuf>,
     /// Set while an SSH session is live. Commands then run on the remote, so
     /// local files and PATH say nothing about them: no completion, and no
     /// red "unknown command".
     remote: Arc<AtomicBool>,
-    /// Rustyline's built-in filename completer, used as the fallback when no
-    /// bookmark matches (and for non-`cd` commands).
-    fs_completer: FilenameCompleter,
-    /// Fish-style autosuggestion source: as the user types, this proposes the
-    /// most recent history entry that starts with the current line. The
-    /// proposal is shown dimmed after the cursor (see `highlight_hint`) and
-    /// accepted with → / End at end-of-line (rustyline's default `CompleteHint`
-    /// binding). Reads the editor's in-memory history, which we seed from the
-    /// persisted history at startup so suggestions span past sessions.
-    hinter: HistoryHinter,
+    /// The suggestion last shown, shared with [HintHandler] so →, End and
+    /// Ctrl+E can accept it.
+    hints: Arc<Mutex<HintCache>>,
     /// Memoised command-name → "is this runnable?" results, used by the
     /// syntax highlighter to colour an unrecognised command red (fish-style).
     /// Cached because `highlight` re-runs on every keystroke and a PATH probe
@@ -256,98 +248,91 @@ fn path_is_executable(p: &Path) -> bool {
     p.is_file()
 }
 
+impl ShellHelper {
+    /// Run `f` with what completion and suggestions draw on, filled as
+    /// Peregrine fills it.
+    fn with_sources<R>(&self, f: impl FnOnce(&CompletionSources) -> R) -> Option<R> {
+        let bookmarks = self.bookmarks.lock().ok()?;
+        let recent_dirs = self.recent_dirs.lock().ok()?;
+        let clone_roots = self.clone_roots.lock().ok()?;
+        let history = self.history.lock().ok()?;
+        let cwd = env::current_dir().ok()?;
+        Some(f(&CompletionSources {
+            cwd: &cwd,
+            home: self.home.as_deref(),
+            bookmarks: &bookmarks,
+            recent_dirs: &recent_dirs,
+            clone_roots: &clone_roots,
+            history: &history,
+            remote: self.remote.load(Ordering::Relaxed),
+        }))
+    }
+}
+
 impl Completer for ShellHelper {
     type Candidate = Pair;
 
+    /// The shared completion (see [complete_input]), so Tab completes as in
+    /// Peregrine.
     fn complete(
         &self,
         line: &str,
         pos: usize,
-        ctx: &Context<'_>,
+        _ctx: &Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
-        if self.remote.load(Ordering::Relaxed) {
-            return Ok((pos, Vec::new()));
-        }
-        // If the command word is `cd`, use the shared bookmark + filesystem
-        // path completer so nested args like `code/Bi` resolve correctly.
-        let bookmarks = self.bookmarks.lock();
-        let recent_dirs = self.recent_dirs.lock();
-        let bookmark_slice: &[PathBuf] = bookmarks.as_deref().map(|v| v.as_slice()).unwrap_or(&[]);
-        let recent_slice: &[RecentDir] =
-            recent_dirs.as_deref().map(|v| v.as_slice()).unwrap_or(&[]);
-        if let Ok(cwd) = env::current_dir()
-            && let Some(result) = complete_cd_path(
-                line,
-                pos,
-                &cwd,
-                self.home.as_deref(),
-                bookmark_slice,
-                recent_slice,
-            )
-            && !result.candidates.is_empty()
-        {
-            let pairs = result
-                .candidates
-                .into_iter()
-                .map(|candidate| Pair {
-                    display: candidate.display,
-                    replacement: candidate.replacement,
-                })
-                .collect();
-            return Ok((result.start, pairs));
-        }
-        drop(bookmarks);
-        drop(recent_dirs);
+        let result = self
+            .with_sources(|src| complete_input(line, pos, src))
+            .flatten();
+        Ok(match result {
+            Some(result) => {
+                let pairs = result
+                    .candidates
+                    .into_iter()
+                    .map(|candidate| Pair {
+                        display: candidate.display,
+                        replacement: candidate.replacement,
+                    })
+                    .collect();
+                (result.start, pairs)
+            }
+            None => (pos, Vec::new()),
+        })
+    }
+}
 
-        // `clone shel` -> `clone https://github.com/<user>/shel`, from the
-        // roots of earlier full-URL clones.
-        if let Ok(roots) = self.clone_roots.lock()
-            && let Some(result) = complete_clone_url(line, pos, &roots)
-            && !result.candidates.is_empty()
-        {
-            let pairs = result
-                .candidates
-                .into_iter()
-                .map(|candidate| Pair {
-                    display: candidate.display,
-                    replacement: candidate.replacement,
-                })
-                .collect();
-            return Ok((result.start, pairs));
-        }
+/// A [shell::InputHint] as rustyline shows it. Only a suggestion that carries
+/// on the line has a completion for rustyline to insert; [HintHandler]
+/// accepts one that rewrites it.
+struct CliHint {
+    display: String,
+    completion: Option<String>,
+}
 
-        // Explicit paths (`./script.sh`, `../bin/foo`, `~/...`) complete against
-        // files as well as directories, so `./install_` + Tab fills in the
-        // script name. rustyline's filename completer doesn't handle these as
-        // the command word, so do it ourselves first.
-        if let Ok(cwd) = env::current_dir()
-            && let Some(result) = complete_command_path(line, pos, &cwd, self.home.as_deref())
-            && !result.candidates.is_empty()
-        {
-            let pairs = result
-                .candidates
-                .into_iter()
-                .map(|candidate| Pair {
-                    display: candidate.display,
-                    replacement: candidate.replacement,
-                })
-                .collect();
-            return Ok((result.start, pairs));
-        }
+impl Hint for CliHint {
+    fn display(&self) -> &str {
+        &self.display
+    }
 
-        // Default: complete files & directories in the CWD (bash-style).
-        self.fs_completer.complete(line, pos, ctx)
+    fn completion(&self) -> Option<&str> {
+        self.completion.as_deref()
     }
 }
 
 impl Hinter for ShellHelper {
-    type Hint = String;
+    type Hint = CliHint;
 
-    /// Delegate to the `HistoryHinter`, which returns the tail of the most
-    /// recent history entry starting with `line` (or `None`). This drives the
-    /// fish-style ghost-text autosuggestion.
-    fn hint(&self, line: &str, pos: usize, ctx: &Context<'_>) -> Option<String> {
-        self.hinter.hint(line, pos, ctx)
+    /// The shared fish-style suggestion (see [shell::input_hint]): the rest
+    /// of a past command, or Tab's one completion. Shown dimmed after the
+    /// cursor (see `highlight_hint`); [HintHandler] accepts it.
+    fn hint(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> Option<CliHint> {
+        let hint = self
+            .with_sources(|src| self.hints.lock().ok()?.get(line, pos, src))
+            .flatten()?;
+        let completion = hint.line.strip_prefix(line).map(str::to_string);
+        Some(CliHint {
+            display: hint.display,
+            completion,
+        })
     }
 }
 
@@ -407,52 +392,19 @@ struct BookmarkHandler {
     history: Arc<Mutex<Vec<HistoryItem>>>,
     remote_terminals: Arc<Mutex<Vec<RemoteTerminal>>>,
     clone_roots: Arc<Mutex<Vec<String>>>,
-    /// Snapshot of `panel_vis` taken at handler construction. The CLI
-    /// never mutates this field, so the snapshot is always current and
-    /// we just write it back unchanged to preserve GUI settings.
-    panel_vis: PanelVis,
-    /// Snapshot of the GUI window size, written back unchanged for the same
-    /// reason as `panel_vis`.
-    window_size: Option<WindowSize>,
-    /// Snapshot of the GUI open-tab layout, written back unchanged for the
-    /// same reason as `panel_vis`.
+    /// Snapshot of the GUI open-tab layout taken at handler construction.
+    /// The CLI never mutates this field, so the snapshot is always current
+    /// and we just write it back unchanged to preserve the GUI's tabs.
     open_tabs: OpenTabs,
-    /// Snapshot of the GUI font size, written back unchanged for the same
-    /// reason as `panel_vis`.
-    font_size: FontSizes,
-    /// Snapshot of the GUI's Bookmarks / Recent dirs path lengths, written
-    /// back unchanged for the same reason as `panel_vis`.
-    dir_label_lens: DirLabelLens,
-    /// Snapshot of the GUI's Bookmarks panel ordering, written back unchanged
-    /// for the same reason as `panel_vis`.
-    bookmark_view: BookmarkView,
-    /// Snapshot of the GUI's side-panel widths, written back unchanged for the
-    /// same reason as `panel_vis`.
-    panel_widths: PanelWidths,
-    /// Snapshot of the GUI's Files-panel toggles, written back unchanged for
-    /// the same reason as `panel_vis`.
-    files_panel: FilesPanelPrefs,
-    /// Snapshot of the GUI's list / details dividers, written back
-    /// unchanged for the same reason as `panel_vis`.
-    pane_splits: PaneSplits,
-    /// Snapshot of the GUI's Cmd history toggles, written back unchanged for
-    /// the same reason as `panel_vis`.
-    cmd_history: CmdHistoryPrefs,
-    /// Snapshot of the GUI's appearance, written back unchanged for the same
-    /// reason as `panel_vis`.
-    appearance: Appearance,
+    /// Snapshot of the GUI's custom bookmark order, written back unchanged
+    /// for the same reason as `open_tabs`.
+    bookmark_order: Vec<PathBuf>,
     /// Snapshot of the GUI's clipboard history, written back unchanged for
-    /// the same reason as `panel_vis`.
+    /// the same reason as `open_tabs`.
     clipboard: Vec<ClipboardEntry>,
     /// Snapshot of the GUI's scratchpad text, written back unchanged for
-    /// the same reason as `panel_vis`.
+    /// the same reason as `open_tabs`.
     scratchpad: String,
-    /// Snapshot of the GUI's scratchpad settings, written back unchanged for
-    /// the same reason as `panel_vis`.
-    scratchpad_prefs: ScratchpadPrefs,
-    /// Snapshot of the GUI's pane order, written back unchanged for the
-    /// same reason as `panel_vis`.
-    pane_order: Vec<String>,
     save_path: PathBuf,
     printer: SharedPrinter,
     /// Shared recall state. After adding a bookmark we stash the current input
@@ -493,21 +445,10 @@ impl ConditionalEventHandler for BookmarkHandler {
                         &history,
                         &remote_terminals,
                         &clone_roots,
-                        &self.panel_vis,
-                        self.window_size,
                         &self.open_tabs,
-                        self.font_size,
-                        self.dir_label_lens,
-                        &self.bookmark_view,
-                        self.panel_widths,
-                        self.files_panel,
-                        self.pane_splits,
-                        self.cmd_history,
-                        self.appearance,
+                        &self.bookmark_order,
                         &self.clipboard,
                         &self.scratchpad,
-                        self.scratchpad_prefs,
-                        &self.pane_order,
                         &self.save_path,
                     )
                 {
@@ -714,23 +655,23 @@ fn main() {
         .or_else(|| env::var_os("HOME"))
         .map(PathBuf::from);
     let remote = Arc::new(AtomicBool::new(false));
+    let hints = Arc::new(Mutex::new(HintCache::default()));
     rl.set_helper(Some(ShellHelper {
         bookmarks: state.dir_bookmarks.clone(),
         recent_dirs: state.recent_dirs.clone(),
         clone_roots: state.clone_roots.clone(),
+        history: state.history.clone(),
         home: home.clone(),
         remote: remote.clone(),
-        fs_completer: FilenameCompleter::new(),
-        hinter: HistoryHinter::new(),
+        hints: hints.clone(),
         cmd_cache: RefCell::new(HashMap::new()),
     }));
 
     // Seed rustyline's in-memory history from our persisted history (oldest
-    // first, so the newest ends up most-recent). The autosuggestion hinter and
-    // any rustyline-side search read from this list, so without seeding,
-    // ghost-text suggestions would only draw on commands typed in the current
-    // session. Our own ↑/↓ recall reads `state.history` directly and is
-    // unaffected.
+    // first, so the newest ends up most-recent). Rustyline's own search
+    // (Ctrl+R) reads this list, so without seeding it would only find
+    // commands typed in the current session. Our own ↑/↓ recall and the
+    // greyed suggestion read `state.history` directly and are unaffected.
     if let Ok(history) = state.history.lock() {
         for i in shell::history_latest_indices(&history) {
             let _ = rl.add_history_entry(&history[i].text);
@@ -761,21 +702,10 @@ fn main() {
             remote_terminals: state.remote_terminals.clone(),
             clone_roots: state.clone_roots.clone(),
             nav: hist_nav.clone(),
-            panel_vis: state.panel_vis,
-            window_size: state.window_size,
             open_tabs: state.open_tabs.clone(),
-            font_size: state.font_size,
-            dir_label_lens: state.dir_label_lens,
-            bookmark_view: state.bookmark_view.clone(),
-            panel_widths: state.panel_widths,
-            files_panel: state.files_panel,
-            pane_splits: state.pane_splits,
-            cmd_history: state.cmd_history,
-            appearance: state.appearance,
+            bookmark_order: state.bookmark_order.clone(),
             clipboard: state.clipboard.clone(),
             scratchpad: state.scratchpad.clone(),
-            scratchpad_prefs: state.scratchpad_prefs,
-            pane_order: state.pane_order.clone(),
             save_path: state_path.clone(),
             printer: printer.clone(),
         })),
@@ -851,10 +781,27 @@ fn main() {
         KeyEvent(KeyCode::Left, Modifiers::NONE),
         EventHandler::Conditional(Box::new(bind_arrow(NavAxis::Cd, true))),
     );
+    // → walks recent dirs as above; otherwise it, End and Ctrl+E accept the
+    // greyed suggestion at the end of the line, as in Peregrine.
     rl.bind_sequence(
         KeyEvent(KeyCode::Right, Modifiers::NONE),
-        EventHandler::Conditional(Box::new(bind_arrow(NavAxis::Cd, false))),
+        EventHandler::Conditional(Box::new(HintHandler {
+            hints: hints.clone(),
+            arrow: Some(bind_arrow(NavAxis::Cd, false)),
+        })),
     );
+    for key in [
+        KeyEvent(KeyCode::End, Modifiers::NONE),
+        KeyEvent::new('e', Modifiers::CTRL),
+    ] {
+        rl.bind_sequence(
+            key,
+            EventHandler::Conditional(Box::new(HintHandler {
+                hints: hints.clone(),
+                arrow: None,
+            })),
+        );
+    }
 
     loop {
         // Snapshot the nav state for this iteration. If a previous arrow

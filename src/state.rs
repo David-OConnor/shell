@@ -41,55 +41,20 @@ pub struct State {
     /// on its own `State`.) Only `refresh_browser_files` writes it, so it's
     /// private to this module.
     browser_files: Arc<Mutex<Vec<BrowserFile>>>,
-    /// GUI panel-visibility settings. The CLI doesn't read these — they're
-    /// here purely so a CLI-side save round-trips the GUI's layout choice
-    /// instead of clobbering it back to defaults.
-    pub panel_vis: PanelVis,
-    /// Last GUI window size. Like `panel_vis`, the CLI never reads or mutates
-    /// this — it's held only so a CLI-side save writes the GUI's value back
-    /// unchanged instead of dropping the `WINDOW_SIZE` line.
-    pub window_size: Option<WindowSize>,
-    /// GUI open-tab layout. Like `panel_vis` / `window_size`, the CLI never
-    /// reads or mutates this — it's held only so a CLI-side save round-trips
-    /// the GUI's tabs back unchanged instead of dropping them.
+    /// GUI open-tab layout. The CLI never reads or mutates this — it's held
+    /// only so a CLI-side save round-trips the GUI's tabs back unchanged
+    /// instead of dropping them. (The GUI's settings and layout aren't in
+    /// the state file at all; it saves those itself.)
     pub open_tabs: OpenTabs,
-    /// GUI font sizes. Like the fields above, the CLI never reads or mutates
-    /// these — held only so a CLI-side save writes the GUI's values back
-    /// unchanged instead of dropping the `FONT_SIZE` line.
-    pub font_size: FontSizes,
-    /// GUI Bookmarks / Recent dirs path lengths. Held only to round-trip the
-    /// `DIR_LABEL_LEN` line, like `font_size`.
-    pub dir_label_lens: DirLabelLens,
-    /// GUI Bookmarks panel ordering. Held only to round-trip the `BM_SORT`
-    /// and `BM_ORDER` lines, like `font_size`.
-    pub bookmark_view: BookmarkView,
-    /// GUI side-panel widths. Held only to round-trip the `PANEL_WIDTH` line,
-    /// like `font_size`.
-    pub panel_widths: PanelWidths,
-    /// GUI Files-panel toggles. Held only to round-trip the `FILES_PANEL`
-    /// line, like `font_size`.
-    pub files_panel: FilesPanelPrefs,
-    /// GUI list / details dividers. Held only to round-trip the
-    /// `PANE_SPLIT` line, like `font_size`.
-    pub pane_splits: PaneSplits,
-    /// GUI Cmd history toggles. Held only to round-trip the `CMD_HISTORY`
-    /// line, like `font_size`.
-    pub cmd_history: CmdHistoryPrefs,
-    /// GUI appearance. Held only to round-trip the `APPEARANCE` line, like
-    /// `font_size`.
-    pub appearance: Appearance,
+    /// The order the GUI's Bookmarks panel was dragged into. Held only to
+    /// round-trip the `BM_ORDER` lines, like `open_tabs`.
+    pub bookmark_order: Vec<PathBuf>,
     /// GUI clipboard history, newest first. Held only to round-trip the
-    /// `CLIP` lines, like `font_size`.
+    /// `CLIP` lines, like `open_tabs`.
     pub clipboard: Vec<ClipboardEntry>,
     /// GUI scratchpad text. Held only to round-trip the `SCRATCHPAD` line,
-    /// like `font_size`.
+    /// like `open_tabs`.
     pub scratchpad: String,
-    /// GUI scratchpad settings. Held only to round-trip the
-    /// `SCRATCHPAD_PREFS` line, like `font_size`.
-    pub scratchpad_prefs: ScratchpadPrefs,
-    /// GUI pane order. Held only to round-trip the `PANE_ORDER` line, like
-    /// `font_size`.
-    pub pane_order: Vec<String>,
     /// Cached git branch for `cwd`. `None` when cwd isn't inside a repo.
     /// Refreshed by `refresh_branch` after every command and after `cd` —
     /// branch can change behind our back via `git checkout`, so we re-check
@@ -118,21 +83,10 @@ impl Default for State {
             remote_terminals: Arc::new(Mutex::new(Vec::new())),
             clone_roots: Arc::new(Mutex::new(Vec::new())),
             browser_files: Arc::new(Mutex::new(Vec::new())),
-            panel_vis: PanelVis::default(),
-            window_size: None,
             open_tabs: OpenTabs::default(),
-            font_size: FontSizes::default(),
-            dir_label_lens: DirLabelLens::default(),
-            bookmark_view: BookmarkView::default(),
-            panel_widths: PanelWidths::default(),
-            files_panel: FilesPanelPrefs::default(),
-            pane_splits: PaneSplits::default(),
-            cmd_history: CmdHistoryPrefs::default(),
-            appearance: Appearance::default(),
+            bookmark_order: Vec::new(),
             clipboard: Vec::new(),
             scratchpad: String::new(),
-            scratchpad_prefs: ScratchpadPrefs::default(),
-            pane_order: Vec::new(),
             branch,
             active_remote: None,
         }
@@ -239,21 +193,10 @@ impl State {
             &history,
             &remote_terminals,
             &clone_roots,
-            &self.panel_vis,
-            self.window_size,
             &self.open_tabs,
-            self.font_size,
-            self.dir_label_lens,
-            &self.bookmark_view,
-            self.panel_widths,
-            self.files_panel,
-            self.pane_splits,
-            self.cmd_history,
-            self.appearance,
+            &self.bookmark_order,
             &self.clipboard,
             &self.scratchpad,
-            self.scratchpad_prefs,
-            &self.pane_order,
             path,
         )
     }
@@ -275,21 +218,10 @@ impl State {
             remote_terminals: Arc::new(Mutex::new(loaded.remote_terminals)),
             clone_roots: Arc::new(Mutex::new(loaded.clone_roots)),
             browser_files: Arc::new(Mutex::new(Vec::new())),
-            panel_vis: loaded.panel_vis,
-            window_size: loaded.window_size,
             open_tabs: loaded.open_tabs,
-            font_size: loaded.font_size,
-            dir_label_lens: loaded.dir_label_lens,
-            bookmark_view: loaded.bookmark_view,
-            panel_widths: loaded.panel_widths,
-            files_panel: loaded.files_panel,
-            pane_splits: loaded.pane_splits,
-            cmd_history: loaded.cmd_history,
-            appearance: loaded.appearance,
+            bookmark_order: loaded.bookmark_order,
             clipboard: loaded.clipboard,
             scratchpad: loaded.scratchpad,
-            scratchpad_prefs: loaded.scratchpad_prefs,
-            pane_order: loaded.pane_order,
             branch,
             active_remote: None,
         })
@@ -332,234 +264,9 @@ pub struct RemoteTerminal {
     pub username: String,
 }
 
-/// Which optional side panels in the GUI are currently visible. This lives in
-/// the shared lib so the CLI can round-trip it through the save file
-/// without understanding what each panel does.
-///
-/// Each field is `true` for visible, `false` for hidden.
-#[derive(Clone, Copy, Debug)]
-pub struct PanelVis {
-    pub bookmarks: bool,
-    pub recent_dirs: bool,
-    pub recent_cmds: bool,
-    pub recent_cmds_in_dir: bool,
-    pub remote_terminals: bool,
-    pub file_browser: bool,
-    /// The PATH editor (`peregrine`'s PATH panel).
-    pub path_editor: bool,
-    /// `peregrine`'s clipboard history panel.
-    pub clipboard: bool,
-    /// `peregrine`'s scratchpad window.
-    pub scratchpad: bool,
-    /// `peregrine`'s terminal output and input.
-    pub terminal: bool,
-}
-
-impl Default for PanelVis {
-    fn default() -> Self {
-        Self {
-            bookmarks: true,
-            recent_dirs: true,
-            recent_cmds: true,
-            recent_cmds_in_dir: true,
-            remote_terminals: false,
-            file_browser: true,
-            path_editor: false,
-            clipboard: false,
-            scratchpad: false,
-            terminal: true,
-        }
-    }
-}
-
-/// Last GUI window size, in logical points (`x` = width, `y` = height).
-/// Persisted so the window reopens at the size the user left it. The CLI
-/// has no window and never reads this — like [PanelVis] it lives here only
-/// so a CLI-side save round-trips the GUI's value instead of dropping it.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct WindowSize {
-    pub x: f32,
-    pub y: f32,
-}
-
-/// GUI font sizes, in points: `cli` for the terminal input/output panes, `gui`
-/// for the side panels. `None` when the state file has no value for one (it
-/// predates the setting, or was only ever saved by the CLI), in which case the
-/// GUI uses its default. Like [WindowSize], the CLI never reads these — they
-/// live here only so a CLI-side save round-trips the GUI's values.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct FontSizes {
-    pub cli: Option<f32>,
-    pub gui: Option<f32>,
-}
-
-/// GUI max displayed path lengths, in characters, for the Bookmarks and
-/// Recent dirs panels; longer paths are truncated from the front. Also whether
-/// each panel shows just the final directory name (`bookmark_names`,
-/// `recent_dir_names`) rather than the path. `None` when the state file has
-/// no value for one, in which case the GUI uses its default. Like
-/// [FontSizes], the CLI never reads these — they live here only so a
-/// CLI-side save round-trips the GUI's values.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct DirLabelLens {
-    pub bookmarks: Option<usize>,
-    pub recent_dirs: Option<usize>,
-    pub bookmark_names: Option<bool>,
-    pub recent_dir_names: Option<bool>,
-}
-
-/// How the GUI's Bookmarks panel orders its rows. The GUI picks the default.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BookmarkSort {
-    /// Oldest first: the order [State::dir_bookmarks] keeps them in.
-    Added,
-    /// By each dir's final name, ignoring case.
-    Alpha,
-    /// By path, so dirs in the same part of the tree sit together.
-    Proximity,
-    /// The order the user dragged them into; see [BookmarkView::order].
-    Custom,
-}
-
-impl BookmarkSort {
-    /// The name the state file stores it under.
-    pub fn key(self) -> &'static str {
-        match self {
-            Self::Added => "added",
-            Self::Alpha => "alpha",
-            Self::Proximity => "proximity",
-            Self::Custom => "custom",
-        }
-    }
-
-    /// The mode stored as `key` (see [Self::key]), if any.
-    pub fn from_key(key: &str) -> Option<Self> {
-        [Self::Added, Self::Alpha, Self::Proximity, Self::Custom]
-            .into_iter()
-            .find(|s| s.key() == key)
-    }
-}
-
-/// GUI Bookmarks panel ordering: the sort mode (`None` when the state file
-/// has none, in which case the GUI uses its default), and the order the user
-/// dragged the bookmarks into for [BookmarkSort::Custom]. `order` can name
-/// bookmarks since removed, and miss ones added since (e.g. by the CLI's
-/// Ctrl+B); the GUI skips the first and puts the second last. Like
-/// [FontSizes], the CLI never reads these — they live here only so a
-/// CLI-side save round-trips the GUI's values.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct BookmarkView {
-    pub sort: Option<BookmarkSort>,
-    pub order: Vec<PathBuf>,
-}
-
-/// GUI side-panel widths, in logical points, as the user last dragged them.
-/// Fields mirror [PanelVis]. `None` when the state file has no value for one,
-/// in which case the GUI uses that panel's default width. Like [FontSizes],
-/// the CLI never reads these — they live here only so a CLI-side save
-/// round-trips the GUI's values.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct PanelWidths {
-    pub bookmarks: Option<f32>,
-    pub recent_dirs: Option<f32>,
-    pub recent_cmds: Option<f32>,
-    pub recent_cmds_in_dir: Option<f32>,
-    pub remote_terminals: Option<f32>,
-    pub file_browser: Option<f32>,
-    pub path_editor: Option<f32>,
-    pub scratchpad: Option<f32>,
-}
-
-/// GUI Files-panel toggles, as the user last left them: whether entries with
-/// the Windows Hidden attribute (`show_hidden`) and names starting with `.`
-/// (`show_dotfiles`) are listed, and whether Deep search matches file names
-/// rather than contents (`deep_search_names`). `None` when the state file has
-/// no value for one, in which case the GUI uses its default. Like
-/// [PanelWidths], the CLI never reads these — they live here only so a
-/// CLI-side save round-trips the GUI's values.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct FilesPanelPrefs {
-    pub show_hidden: Option<bool>,
-    pub show_dotfiles: Option<bool>,
-    pub deep_search_names: Option<bool>,
-}
-
-/// Where the GUI's list / details dividers were last dragged to, each as
-/// the fraction of its pane's height the details below take: the Files
-/// panel's (`files`) and the PATH window's (`path`). `None` when the state
-/// file has no value for one, in which case the GUI uses its default. Like
-/// [PanelWidths], the CLI never reads these — they live here only so a
-/// CLI-side save round-trips the GUI's values.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct PaneSplits {
-    pub files: Option<f32>,
-    pub path: Option<f32>,
-}
-
-/// GUI Cmd history panel toggles, as the user last left them: whether each
-/// row shows the "In <dir>" button under the command (`show_dir`). `None`
-/// when the state file has no value for one, in which case the GUI uses its
-/// default. Like [PanelWidths], the CLI never reads these — they live here
-/// only so a CLI-side save round-trips the GUI's values.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct CmdHistoryPrefs {
-    pub show_dir: Option<bool>,
-}
-
-/// What Tab does in the GUI's scratchpad.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ScratchpadTab {
-    /// Inserts a tab character.
-    #[default]
-    Tab,
-    /// Inserts 4 spaces.
-    Spaces,
-    /// Moves the keyboard to the CLI input, as Tab does elsewhere in the GUI.
-    FocusTerm,
-}
-
-impl ScratchpadTab {
-    /// The name the state file stores it under.
-    pub fn key(self) -> &'static str {
-        match self {
-            Self::Tab => "tab",
-            Self::Spaces => "spaces",
-            Self::FocusTerm => "focus_term",
-        }
-    }
-
-    /// The mode stored as `key` (see [Self::key]), if any.
-    pub fn from_key(key: &str) -> Option<Self> {
-        [Self::Tab, Self::Spaces, Self::FocusTerm]
-            .into_iter()
-            .find(|s| s.key() == key)
-    }
-}
-
-/// GUI scratchpad settings, as the user last left them: what Tab does in it
-/// (`tab`). `None` when the state file has no value for one, in which case
-/// the GUI uses its default. Like [PanelWidths], the CLI never reads these —
-/// they live here only so a CLI-side save round-trips the GUI's values.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct ScratchpadPrefs {
-    pub tab: Option<ScratchpadTab>,
-}
-
-/// GUI appearance, as the user last left it: whether the window is dark
-/// (`dark_mode`; `None` follows the OS theme), and how many directory levels
-/// the path colours take to go from purple to yellow (`dir_color_depth`;
-/// `None` uses the GUI's default). `None` when the state file has no value.
-/// Like [PanelWidths], the CLI never reads this — it lives here only so a
-/// CLI-side save round-trips the GUI's values.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Appearance {
-    pub dark_mode: Option<bool>,
-    pub dir_color_depth: Option<u8>,
-}
-
 /// One entry in the GUI's clipboard history (`peregrine`'s Clipboard panel):
 /// what was copied, and when it was last put on the clipboard. Like
-/// [PanelWidths], the CLI never reads these — they live here only so a
+/// [OpenTabs], the CLI never reads these — they live here only so a
 /// CLI-side save round-trips the GUI's history.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClipboardEntry {
@@ -576,10 +283,9 @@ pub enum ClipboardContent {
 
 /// GUI tab layout persisted across runs: the working directory of each open
 /// tab (in tab order) plus the index of the one that was active. Persisted so
-/// reopening the GUI restores the same set of tabs the user left open. Like
-/// [PanelVis] / [WindowSize] this lives in the shared lib only so a CLI-side
-/// save round-trips the GUI's value instead of dropping it; the CLI has no
-/// tabs of its own. An empty `paths` means "nothing saved" — the GUI falls
+/// reopening the GUI restores the same set of tabs the user left open. This
+/// lives in the shared lib only so a CLI-side save round-trips the GUI's
+/// value instead of dropping it; the CLI has no tabs of its own. An empty `paths` means "nothing saved" — the GUI falls
 /// back to a single tab at the current directory.
 #[derive(Clone, Debug, Default)]
 pub struct OpenTabs {

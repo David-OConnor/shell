@@ -5,8 +5,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use rustyline::{Cmd, ConditionalEventHandler, Event, EventContext, RepeatCount};
-use shell::state::{HistoryItem, RecentDir};
+use rustyline::{Cmd, ConditionalEventHandler, Event, EventContext, Movement, RepeatCount};
+use shell::{
+    HintCache,
+    state::{HistoryItem, RecentDir},
+};
 
 use crate::{CliNav, NavAxis, render};
 
@@ -60,5 +63,44 @@ impl ConditionalEventHandler for ArrowHandler {
                 }
             }
         }
+    }
+}
+
+/// Accepts the greyed suggestion (see [shell::input_hint]) with the caret at
+/// the end of the line, as Peregrine does. Bound to → (once `arrow` has passed
+/// on it, i.e. when it isn't walking recent dirs), End and Ctrl+E. Anywhere
+/// else, passes the key on so it moves the caret as usual.
+pub(crate) struct HintHandler {
+    pub(crate) hints: Arc<Mutex<HintCache>>,
+    pub(crate) arrow: Option<ArrowHandler>,
+}
+
+impl ConditionalEventHandler for HintHandler {
+    fn handle(
+        &self,
+        evt: &Event,
+        n: RepeatCount,
+        positive: bool,
+        ctx: &EventContext<'_>,
+    ) -> Option<Cmd> {
+        if let Some(cmd) = self
+            .arrow
+            .as_ref()
+            .and_then(|a| a.handle(evt, n, positive, ctx))
+        {
+            return Some(cmd);
+        }
+        if !ctx.has_hint() || ctx.pos() != ctx.line().len() {
+            return None;
+        }
+        let hints = self.hints.lock().ok()?;
+        let hint = hints.last_for(ctx.line())?;
+        // One that carries on the line is rustyline's to insert; one that
+        // rewrites a word replaces the line.
+        Some(if hint.line.starts_with(ctx.line()) {
+            Cmd::CompleteHint
+        } else {
+            Cmd::Replace(Movement::WholeLine, Some(hint.line.clone()))
+        })
     }
 }

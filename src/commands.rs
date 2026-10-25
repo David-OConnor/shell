@@ -23,8 +23,9 @@ use std::{
 };
 
 use crate::{
-    DirList, clone_root, expand_clone, find_bookmark, find_cd_fallback, find_history_index,
-    path_from_args, quiet_command, record_clone_root, remove_saved_dir, ssh, stale_dir_list,
+    DirList, RecentDir, clone_root, expand_clone, find_bookmark, find_history_index,
+    path_from_args, quiet_command, record_clone_root, remove_saved_dir, resolve_cd, ssh,
+    stale_dir_list,
     state::State,
     util::{confirm, render_with_tilde},
 };
@@ -659,18 +660,21 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
                 resolved
             } else {
                 let bookmarks = state.dir_bookmarks.lock();
-                let slice: &[PathBuf] = bookmarks.as_deref().map(|v| v.as_slice()).unwrap_or(&[]);
-                let mut target = path_from_args(state.home.as_deref(), &state.cwd, slice, args);
+                let recent = state.recent_dirs.lock();
+                let bookmark_slice: &[PathBuf] =
+                    bookmarks.as_deref().map(|v| v.as_slice()).unwrap_or(&[]);
+                let recent_slice: &[RecentDir] =
+                    recent.as_deref().map(|v| v.as_slice()).unwrap_or(&[]);
+                let resolved = resolve_cd(
+                    state.home.as_deref(),
+                    &state.cwd,
+                    bookmark_slice,
+                    recent_slice,
+                    args,
+                );
                 drop(bookmarks);
-                if !target.is_dir() && !args.is_empty() && !args.starts_with('~') {
-                    if let Ok(recent) = state.recent_dirs.lock() {
-                        if let Some(found) = find_cd_fallback(&recent, state.home.as_deref(), args)
-                        {
-                            target = found;
-                        }
-                    }
-                }
-                Some(target)
+                drop(recent);
+                resolved.map_err(|e| eprintln!("cd: {e}")).ok()
             };
 
             if let Some(target) = target {
@@ -895,7 +899,7 @@ pub fn shelp_text(frontend: Frontend) -> String {
         ("--version, -v", "Show the shell's version"),
         (
             "cd <path>",
-            "Change directory. Takes `~`, a real path, or part of a bookmark/recent path",
+            "Change directory. Takes `~`, a real path, part of a bookmark/recent path, or the start of any name Tab would complete",
         ),
         ("cd <number>", "Go to a recent directory by its index"),
         (
@@ -1024,7 +1028,7 @@ pub fn shelp_text(frontend: Frontend) -> String {
             ("Enter", "Run the input"),
             (
                 "Tab",
-                "Autocomplete: bookmarks, directories, and dirs under bookmarks after `cd`; repo URLs after `clone`; filenames otherwise",
+                "Autocomplete at the cursor: bookmarks, directories, and dirs under bookmarks after `cd`; repo URLs after `clone`; filenames otherwise. Tab again lists the choices",
             ),
             (
                 "Up / Down",
@@ -1035,8 +1039,8 @@ pub fn shelp_text(frontend: Frontend) -> String {
                 "Walk recent directories, loading `cd <path>` into the input",
             ),
             (
-                "Right / End",
-                "Accept the dimmed autosuggestion at the end of the line",
+                "Right / End / Ctrl + E",
+                "Accept the greyed suggestion at the end of the line: the rest of a past command, or Tab's only completion (`→ path` when it rewrites the word)",
             ),
             ("Ctrl + B", "Bookmark the current directory"),
             ("Ctrl + 1", "List bookmarks"),
@@ -1054,11 +1058,18 @@ pub fn shelp_text(frontend: Frontend) -> String {
     } else {
         &[
             ("Enter", "Run the input"),
-            ("Tab", "Autocomplete the input"),
+            (
+                "Tab",
+                "Autocomplete at the cursor: bookmarks, directories, and dirs under bookmarks after `cd`; repo URLs after `clone`; filenames otherwise. Tab again lists the choices",
+            ),
             ("Up / Down", "Walk command history"),
             (
                 "Left / Right",
                 "Walk recent directories, while the input is empty",
+            ),
+            (
+                "Right / End / Ctrl + E",
+                "Accept the greyed suggestion at the end of the line: the rest of a past command, or Tab's only completion (`→ path` when it rewrites the word)",
             ),
             (
                 "Ctrl + B",

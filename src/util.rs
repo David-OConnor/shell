@@ -12,6 +12,7 @@ use std::{
 
 use crate::{
     common_dirs::common_dirs,
+    input_completion::cd_completion_target,
     state::{BrowserFile, HistoryItem, RecentDir},
 };
 
@@ -193,6 +194,35 @@ pub fn find_cd_fallback(recent: &[RecentDir], home: Option<&Path>, query: &str) 
         .map(|(_, p)| p.to_path_buf())
 }
 
+/// Where `cd <args>` goes, `cd <number>` aside: `args` as a path or bookmark
+/// (see [path_from_args]), else a recent or standard directory (see
+/// [find_cd_fallback]), else the one directory Tab would complete it to, e.g.
+/// `~/strike/White Wedding/ew` → `~/strike/White Wedding/ew-debrief`. `Err`
+/// names the directories it could be when Tab finds several. When nothing
+/// matches, the path comes back as written, for `cd` to report.
+pub fn resolve_cd(
+    home: Option<&Path>,
+    cwd: &Path,
+    bookmarks: &[PathBuf],
+    recent_dirs: &[RecentDir],
+    args: &str,
+) -> Result<PathBuf, String> {
+    let target = path_from_args(home, cwd, bookmarks, args);
+    if args.is_empty() || target.is_dir() {
+        return Ok(target);
+    }
+    // `~/x` says where it is, so only its last name is completed below.
+    if !args.starts_with('~')
+        && let Some(found) = find_cd_fallback(recent_dirs, home, args)
+    {
+        return Ok(found);
+    }
+    match cd_completion_target(args, cwd, home, bookmarks, recent_dirs) {
+        Ok(found) => Ok(found.unwrap_or(target)),
+        Err(names) => Err(format!("`{args}` could be any of: {}", names.join("   "))),
+    }
+}
+
 /// A saved directory list a `cd` target can be picked from. When the target
 /// turns out to no longer exist, both frontends offer to remove it from its
 /// list (see [stale_dir_list]).
@@ -318,7 +348,7 @@ const PATH_TIER: u8 = 2;
 /// [best_path_match] with the winner's rank, `(tier, name length)`, lower
 /// being better. The full path is only searched when `whole_path` is set.
 /// Ties go to the first entry of `paths`.
-fn ranked_path_match<'a>(
+pub(crate) fn ranked_path_match<'a>(
     paths: impl Iterator<Item = &'a Path>,
     query: &str,
     whole_path: bool,

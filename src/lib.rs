@@ -15,20 +15,20 @@ mod util;
 
 pub use git::{BRANCH_PREFIX, clone_root, current_branch, expand_clone, truncate_branch};
 pub use input_completion::{
-    CompletionCandidate, CompletionResult, apply_completion, complete_cd_path, complete_clone_url,
-    complete_command_path,
+    CompletionCandidate, CompletionResult, CompletionSources, HintCache, InputHint,
+    apply_completion, complete_cd_path, complete_clone_url, complete_command_path, complete_input,
+    input_hint,
 };
 pub use python::{VENV_PREFIX, venv_python};
 pub use ssh::RemoteSession;
 pub use state::{
-    Appearance, BookmarkSort, BookmarkView, BrowserFile, ClipboardContent, ClipboardEntry,
-    CmdHistoryPrefs, DirLabelLens, FilesPanelPrefs, FontSizes, HistoryItem, NavState, OpenTabs,
-    PaneSplits, PanelVis, PanelWidths, RecentDir, RemoteTerminal, ScratchpadPrefs, ScratchpadTab,
-    WindowSize, dedup_history, record_clone_root, record_history, record_recent_dir,
+    BrowserFile, ClipboardContent, ClipboardEntry, HistoryItem, NavState, OpenTabs, RecentDir,
+    RemoteTerminal, dedup_history, record_clone_root, record_history, record_recent_dir,
 };
 pub use util::{
     DISP_PAGE_LEN, DIVIDER, DirList, dir_missing, find_bookmark, find_cd_fallback,
     find_history_index, get_home, history_indices_in_dir, history_latest_indices, page_count,
     path_from_args, quiet_command, read_browser_files, remove_missing_recent_dirs,
-    remove_saved_dir, render_history, render_history_in_dir, render_page, stale_dir_list,
+    remove_saved_dir, render_history, render_history_in_dir, render_page, resolve_cd,
+    stale_dir_list,
 };

@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{RecentDir, common_dirs::common_dirs, git, util};
+use crate::{HistoryItem, RecentDir, common_dirs::common_dirs, git, util};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompletionResult {
@@ -47,11 +47,181 @@ pub fn apply_completion(line: &str, pos: usize, completion: &CompletionResult) -
     Some(out)
 }
 
+/// What Tab completion and the greyed suggestion draw on besides the line
+/// itself. The CLI and GUI frontends fill it from the same state, so both
+/// complete and suggest alike.
+#[derive(Clone, Copy)]
+pub struct CompletionSources<'a> {
+    pub cwd: &'a Path,
+    pub home: Option<&'a Path>,
+    pub bookmarks: &'a [PathBuf],
+    pub recent_dirs: &'a [RecentDir],
+    pub clone_roots: &'a [String],
+    pub history: &'a [HistoryItem],
+    /// Set while commands run on an SSH remote. Local files say nothing
+    /// about it, so Tab completes nothing and only history is suggested.
+    pub remote: bool,
+}
+
+/// Tab completion for `line` with the caret at `pos`, trying in order: `cd`
+/// paths (see [complete_cd_path]), `clone` repo URLs, explicit paths
+/// (`./script.sh`), then files and folders.
+pub fn complete_input(line: &str, pos: usize, src: &CompletionSources) -> Option<CompletionResult> {
+    complete_ranked(line, pos, src, DESCENDANT_TIME_BUDGET).map(|(result, _)| result)
+}
+
+/// [complete_input], with the worst [match_tier] among its candidates.
+/// `walk_budget` caps the bookmark-subtree walk (see
+/// [complete_bookmark_descendants]).
+fn complete_ranked(
+    line: &str,
+    pos: usize,
+    src: &CompletionSources,
+    walk_budget: Duration,
+) -> Option<(CompletionResult, u8)> {
+    if src.remote {
+        return None;
+    }
+    if let Some((start, arg)) = cd_arg(line, pos)
+        && let Some((tier, candidates)) = cd_candidates(
+            arg,
+            src.cwd,
+            src.home,
+            src.bookmarks,
+            src.recent_dirs,
+            walk_budget,
+        )
+    {
+        return Some((CompletionResult { start, candidates }, tier));
+    }
+    // Clone roots and filenames match by prefix only.
+    if let Some(result) =
+        complete_clone_url(line, pos, src.clone_roots).filter(|r| !r.candidates.is_empty())
+    {
+        return Some((result, 0));
+    }
+    if let Some((start, scored)) = command_path_scored(line, pos, src.cwd, src.home)
+        && !scored.is_empty()
+    {
+        let tier = scored
+            .iter()
+            .map(|(s, _)| match_tier(*s))
+            .max()
+            .unwrap_or(0);
+        let candidates = scored.into_iter().map(|(_, c)| c).collect();
+        return Some((CompletionResult { start, candidates }, tier));
+    }
+    complete_filename(line, pos, src.cwd, src.home).map(|result| (result, 0))
+}
+
+/// The greyed suggestion shown after the caret, which →, End and Ctrl+E
+/// accept. See [input_hint].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InputHint {
+    /// What's shown: the rest of the line, or, for a completion that rewrites
+    /// the word being typed, `→` and what it becomes.
+    pub display: String,
+    /// The input line once the suggestion is accepted.
+    pub line: String,
+}
+
+/// How long the suggestion may spend on the bookmark-subtree walk. It runs
+/// on every keystroke, so much less than Tab's [DESCENDANT_TIME_BUDGET].
+const HINT_WALK_BUDGET: Duration = Duration::from_millis(25);
+
+/// The suggestion for `line` with the caret at `pos`, as both frontends show
+/// it, fish-style: only with the caret at the end of the line. First the rest
+/// of the newest past command that starts with the line. Failing that,
+/// Tab's completion, when it has just one candidate and that isn't a fuzzy
+/// match: `cd ~/strike/White Wedding/ew` suggests `-debrief`, and
+/// `cd wedding/ew`, which Tab rewrites, `→ ~/strike/White Wedding/ew-debrief`.
+pub fn input_hint(line: &str, pos: usize, src: &CompletionSources) -> Option<InputHint> {
+    if line.is_empty() || pos != line.len() {
+        return None;
+    }
+
+    // Only the newest match counts, as with rustyline's history hints: if
+    // that's the line itself, nothing from history is suggested.
+    if let Some(entry) = src.history.iter().rev().find(|h| h.text.starts_with(line))
+        && entry.text != line
+    {
+        return Some(InputHint {
+            display: entry.text[line.len()..].to_string(),
+            line: entry.text.clone(),
+        });
+    }
+
+    let (result, tier) = complete_ranked(line, pos, src, HINT_WALK_BUDGET)?;
+    let [only] = result.candidates.as_slice() else {
+        return None;
+    };
+    if tier == 2 || !line.is_char_boundary(result.start) {
+        return None;
+    }
+    let typed = &line[result.start..pos];
+    let mut accepted = line.to_string();
+    accepted.replace_range(result.start..pos, &only.replacement);
+    // Case-insensitive, as matching is: `white wedding/ew` carries on to
+    // `-debrief`, and accepting it fixes the case.
+    let carries_on = only
+        .replacement
+        .get(..typed.len())
+        .is_some_and(|head| head.to_lowercase() == typed.to_lowercase());
+    let display = if carries_on {
+        only.replacement[typed.len()..].to_string()
+    } else {
+        format!(" → {}", only.replacement)
+    };
+    (!display.is_empty() && accepted != line).then_some(InputHint {
+        display,
+        line: accepted,
+    })
+}
+
+/// The last [input_hint] worked out, for the line, cwd and remote state it
+/// was for. Frontends ask on every redraw, and working it out reads the disk.
+#[derive(Default)]
+pub struct HintCache(Option<(String, PathBuf, bool, Option<InputHint>)>);
+
+impl HintCache {
+    /// [input_hint], reusing the last one when nothing it depends on changed.
+    pub fn get(&mut self, line: &str, pos: usize, src: &CompletionSources) -> Option<InputHint> {
+        if pos != line.len() {
+            return None;
+        }
+        if let Some((l, cwd, remote, hint)) = &self.0
+            && l == line
+            && cwd == src.cwd
+            && *remote == src.remote
+        {
+            return hint.clone();
+        }
+        let hint = input_hint(line, pos, src);
+        self.0 = Some((
+            line.to_string(),
+            src.cwd.to_path_buf(),
+            src.remote,
+            hint.clone(),
+        ));
+        hint
+    }
+
+    /// The last suggestion worked out, if it was for `line`: the one on
+    /// screen, for a key handler to accept.
+    pub fn last_for(&self, line: &str) -> Option<&InputHint> {
+        match &self.0 {
+            Some((l, _, _, hint)) if l == line => hint.as_ref(),
+            _ => None,
+        }
+    }
+}
+
 /// Shared `cd` autocomplete used by both the CLI and GUI frontends. It
 /// completes bookmarked directory names first, then directory entries on disk
-/// (including nested relative paths like `code/Bi`), then recent directories,
-/// then directories nested anywhere under a bookmark, then the OS's standard
-/// directories (see [common_dirs]).
+/// (including nested relative paths like `code/Bi`), then paths under a
+/// bookmark or recent dir named by their first segment (`wedding/ew`), then
+/// recent directories, then directories nested anywhere under a bookmark,
+/// then the OS's standard directories (see [common_dirs]).
 pub fn complete_cd_path(
     line: &str,
     pos: usize,
@@ -60,6 +230,58 @@ pub fn complete_cd_path(
     bookmarks: &[PathBuf],
     recent_dirs: &[RecentDir],
 ) -> Option<CompletionResult> {
+    let (start, arg) = cd_arg(line, pos)?;
+    let candidates = cd_candidates(
+        arg,
+        cwd,
+        home,
+        bookmarks,
+        recent_dirs,
+        DESCENDANT_TIME_BUDGET,
+    )
+    .map(|(_, c)| c)
+    .unwrap_or_default();
+    Some(CompletionResult { start, candidates })
+}
+
+/// Where `cd <arg>` goes when `arg` names no directory as written, nor as a
+/// bookmark, recent or standard directory: the one directory Tab would
+/// complete it to, e.g. `~/strike/White Wedding/ew` →
+/// `~/strike/White Wedding/ew-debrief`. Fuzzy matches don't count. `Ok(None)`
+/// when there's no such directory; `Err` with the candidates' names when there
+/// are several.
+pub(crate) fn cd_completion_target(
+    arg: &str,
+    cwd: &Path,
+    home: Option<&Path>,
+    bookmarks: &[PathBuf],
+    recent_dirs: &[RecentDir],
+) -> Result<Option<PathBuf>, Vec<String>> {
+    let Some((tier, candidates)) = cd_candidates(
+        arg,
+        cwd,
+        home,
+        bookmarks,
+        recent_dirs,
+        DESCENDANT_TIME_BUDGET,
+    ) else {
+        return Ok(None);
+    };
+    match candidates.as_slice() {
+        _ if tier == 2 => Ok(None),
+        [only] => Ok(Some(util::path_from_args(
+            home,
+            cwd,
+            &[],
+            &only.replacement,
+        ))),
+        many => Err(many.iter().map(|c| c.display.clone()).collect()),
+    }
+}
+
+/// The argument of a `cd` line, up to `pos`, and its byte offset. `None` when
+/// the line isn't a `cd` command.
+fn cd_arg(line: &str, pos: usize) -> Option<(usize, &str)> {
     if pos > line.len() || !line.is_char_boundary(pos) {
         return None;
     }
@@ -69,15 +291,25 @@ pub fn complete_cd_path(
     let leading = before.len() - trimmed.len();
 
     let i = trimmed.find(char::is_whitespace)?;
-    let cmd_part = &trimmed[..i];
-    if cmd_part != "cd" {
+    if &trimmed[..i] != "cd" {
         return None;
     }
 
-    let rest = &trimmed[i..];
-    let arg = rest.trim_start();
-    let arg_start = leading + (trimmed.len() - arg.len());
+    let arg = trimmed[i..].trim_start();
+    Some((leading + (trimmed.len() - arg.len()), arg))
+}
 
+/// [complete_cd_path]'s candidates for `arg`, with their match tier (see
+/// [match_tier]), or `None` when nothing matches. `walk_budget` caps the
+/// bookmark-subtree walk (see [complete_bookmark_descendants]).
+fn cd_candidates(
+    arg: &str,
+    cwd: &Path,
+    home: Option<&Path>,
+    bookmarks: &[PathBuf],
+    recent_dirs: &[RecentDir],
+    walk_budget: Duration,
+) -> Option<(u8, Vec<CompletionCandidate>)> {
     // Sources in priority order. Match quality ranks first, so a prefix match
     // in the cwd beats a fuzzy match against a bookmark or recent dir; within
     // the same quality, the earlier source wins.
@@ -89,6 +321,7 @@ pub fn complete_cd_path(
     let mut sources = vec![
         complete_bookmarks(arg, home, bookmarks),
         scored_paths(arg, cwd, home, true),
+        complete_under_saved_dir(arg, cwd, home, bookmarks, recent_dirs),
         recent,
     ];
     // The bookmark-subtree walk is the one costly source, so skip it when a
@@ -96,30 +329,92 @@ pub fn complete_cd_path(
     // Bare names only; paths like `code/Bi` or `~/x` are resolved on disk.
     let bare_name = !arg.is_empty() && !arg.starts_with('~') && !arg.contains(['/', '\\']);
     if bare_name && !sources.iter().flatten().any(|(score, _)| *score == 0) {
-        sources.push(complete_bookmark_descendants(arg, home, bookmarks));
+        sources.push(complete_bookmark_descendants(
+            arg,
+            home,
+            bookmarks,
+            walk_budget,
+        ));
     }
     // Last, so anything of the user's own wins a tie with e.g. `/etc`.
     if bare_name {
         sources.push(complete_common_dirs(arg, home));
     }
 
-    let candidates = (0..=2)
-        .find_map(|tier| {
-            sources.iter().find_map(|source| {
-                let hits: Vec<CompletionCandidate> = source
-                    .iter()
-                    .filter(|(score, _)| match_tier(*score) == tier)
-                    .map(|(_, c)| c.clone())
-                    .collect();
-                (!hits.is_empty()).then_some(hits)
-            })
+    (0..=2).find_map(|tier| {
+        sources.iter().find_map(|source| {
+            let hits: Vec<CompletionCandidate> = source
+                .iter()
+                .filter(|(score, _)| match_tier(*score) == tier)
+                .map(|(_, c)| c.clone())
+                .collect();
+            (!hits.is_empty()).then_some((tier, hits))
         })
-        .unwrap_or_default();
-
-    Some(CompletionResult {
-        start: arg_start,
-        candidates,
     })
+}
+
+/// Complete a relative path whose first segment isn't in the cwd but names a
+/// bookmark, recent dir or standard dir, inside that directory: with
+/// `~/strike/White Wedding` bookmarked, `wedding/ew` →
+/// `~/strike/White Wedding/ew-debrief`, from anywhere.
+fn complete_under_saved_dir(
+    arg: &str,
+    cwd: &Path,
+    home: Option<&Path>,
+    bookmarks: &[PathBuf],
+    recent_dirs: &[RecentDir],
+) -> Vec<(u32, CompletionCandidate)> {
+    let Some(i) = arg.find(['/', '\\']) else {
+        return Vec::new();
+    };
+    let (head, tail) = (&arg[..i], &arg[i + 1..]);
+    // `~/x`, `./x`, `/x` and `C:/x` already say where they are.
+    if head.is_empty() || head.starts_with(['~', '.']) || head.ends_with(':') {
+        return Vec::new();
+    }
+    if cwd.join(head).is_dir() {
+        return Vec::new();
+    }
+    let Some(base) = saved_dir_named(head, home, bookmarks, recent_dirs) else {
+        return Vec::new();
+    };
+    let rendered = util::render_with_tilde(&base, home);
+    let sep = if rendered.starts_with('~') {
+        '/'
+    } else {
+        std::path::MAIN_SEPARATOR
+    };
+    scored_paths(&format!("{rendered}{sep}{tail}"), cwd, home, true)
+}
+
+/// The bookmark, recent dir or standard dir whose name best matches `name`:
+/// prefix before substring, then the shortest name. Within a tier, bookmarks
+/// beat recent dirs, which beat standard dirs.
+fn saved_dir_named(
+    name: &str,
+    home: Option<&Path>,
+    bookmarks: &[PathBuf],
+    recent_dirs: &[RecentDir],
+) -> Option<PathBuf> {
+    // Newest first, so they win ties.
+    let bookmark =
+        util::ranked_path_match(bookmarks.iter().rev().map(PathBuf::as_path), name, false);
+    let recent = util::ranked_path_match(
+        recent_dirs.iter().rev().map(|r| r.path.as_path()),
+        name,
+        false,
+    );
+    // `min_by_key` keeps the first of equal minimums.
+    if let Some((_, p)) = [bookmark, recent]
+        .into_iter()
+        .flatten()
+        .min_by_key(|((tier, _), _)| *tier)
+    {
+        return Some(p.to_path_buf());
+    }
+    let common = common_dirs(home);
+    util::ranked_path_match(common.iter().map(PathBuf::as_path), name, false)
+        .map(|(_, p)| p.to_path_buf())
 }
 
 /// Coarse match quality from a [match_score]: 0 = prefix, 1 = substring,
@@ -289,13 +584,15 @@ const DESCENDANT_SKIP: [&str; 5] = [
 ///
 /// Returns only the shallowest matches of the best quality: a deeper namesake
 /// (e.g. an asset folder named after its project) would otherwise stop Tab
-/// completing the obvious one.
+/// completing the obvious one. Gives up after `budget`, with what it found by
+/// then.
 fn complete_bookmark_descendants(
     arg: &str,
     home: Option<&Path>,
     bookmarks: &[PathBuf],
+    budget: Duration,
 ) -> Vec<(u32, CompletionCandidate)> {
-    let deadline = Instant::now() + DESCENDANT_TIME_BUDGET;
+    let deadline = Instant::now() + budget;
     // Bookmarks themselves are covered by [complete_bookmarks]; marking them
     // visited up front also stops one bookmark's walk re-entering another's.
     let mut visited: HashSet<String> = bookmarks.iter().map(|p| visit_key(p)).collect();
@@ -387,6 +684,21 @@ pub fn complete_command_path(
     cwd: &Path,
     home: Option<&Path>,
 ) -> Option<CompletionResult> {
+    let (start, scored) = command_path_scored(line, pos, cwd, home)?;
+    Some(CompletionResult {
+        start,
+        candidates: scored.into_iter().map(|(_, c)| c).collect(),
+    })
+}
+
+/// [complete_command_path]'s word start and candidates, keeping each
+/// candidate's [match_score].
+fn command_path_scored(
+    line: &str,
+    pos: usize,
+    cwd: &Path,
+    home: Option<&Path>,
+) -> Option<(usize, Vec<(u32, CompletionCandidate)>)> {
     if pos > line.len() || !line.is_char_boundary(pos) {
         return None;
     }
@@ -407,10 +719,7 @@ pub fn complete_command_path(
         return None;
     }
 
-    Some(CompletionResult {
-        start: word_start,
-        candidates: complete_paths(word, cwd, home, false),
-    })
+    Some((word_start, scored_paths(word, cwd, home, false)))
 }
 
 /// Complete the repository argument of `git clone` / `clone` from the saved
@@ -540,23 +849,103 @@ fn is_explicit_path(word: &str) -> bool {
         && (bytes[2] == b'/' || bytes[2] == b'\\')
 }
 
-/// Complete the leaf of `arg` against the directory it points into. When
-/// `dirs_only` is set only subdirectories are offered (used by `cd`); otherwise
-/// files are offered too and directory names get a trailing `/` so completing
-/// into a subdirectory continues naturally.
-fn complete_paths(
-    arg: &str,
+/// Fallback Tab completion: the word before the caret completes against
+/// files and folders in the directory it points into (the cwd for a bare
+/// name), by case-folded prefix. Folders get a trailing `/` so completion
+/// continues into them. A name with a space is opened with a `"`, and inside
+/// an open quote the word runs back to that quote, so `python "White W`
+/// completes too. Files close the quote; folders leave it open for the next
+/// Tab.
+fn complete_filename(
+    line: &str,
+    pos: usize,
     cwd: &Path,
     home: Option<&Path>,
-    dirs_only: bool,
-) -> Vec<CompletionCandidate> {
-    scored_paths(arg, cwd, home, dirs_only)
-        .into_iter()
-        .map(|(_, c)| c)
-        .collect()
+) -> Option<CompletionResult> {
+    let before = line.get(..pos)?;
+    let quote = open_quote(before);
+    let start = match quote {
+        Some((i, _)) => i + 1,
+        None => before.rfind(char::is_whitespace).map_or(0, |i| i + 1),
+    };
+
+    let word = &before[start..];
+    let (dir_part, leaf) = match word.rfind(['/', '\\']) {
+        Some(i) => (&word[..=i], &word[i + 1..]),
+        None => ("", word),
+    };
+
+    let dir = match dir_part
+        .strip_prefix("~/")
+        .or_else(|| dir_part.strip_prefix("~\\"))
+    {
+        Some(rest) => home?.join(rest),
+        None => cwd.join(dir_part),
+    };
+
+    let leaf = fold_case(leaf);
+
+    let mut candidates: Vec<CompletionCandidate> = fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if !fold_case(&name).starts_with(&leaf) {
+                return None;
+            }
+            let is_dir = fs::metadata(e.path()).ok()?.is_dir();
+            let mut replacement = format!("{dir_part}{name}");
+            if is_dir {
+                replacement.push('/');
+            }
+            match quote {
+                Some((_, q)) if !is_dir => replacement.push(q),
+                None if replacement.contains(' ') => {
+                    replacement.insert(0, '"');
+                    if !is_dir {
+                        replacement.push('"');
+                    }
+                }
+                _ => (),
+            }
+            let display = if is_dir { format!("{name}/") } else { name };
+            Some(CompletionCandidate {
+                display,
+                replacement,
+            })
+        })
+        .collect();
+    candidates.sort_by(|a, b| a.display.cmp(&b.display));
+    Some(CompletionResult { start, candidates })
 }
 
-/// [complete_paths], keeping each candidate's [match_score], best-first.
+/// Byte index and char of a quote (`"` or `'`) that `s` leaves unclosed.
+fn open_quote(s: &str) -> Option<(usize, char)> {
+    let mut open = None;
+    for (i, c) in s.char_indices() {
+        match open {
+            Some((_, q)) if c == q => open = None,
+            None if c == '"' || c == '\'' => open = Some((i, c)),
+            _ => (),
+        }
+    }
+    open
+}
+
+/// Filenames match case-insensitively where the filesystem is.
+fn fold_case(s: &str) -> String {
+    if cfg!(any(windows, target_os = "macos")) {
+        s.to_lowercase()
+    } else {
+        s.to_string()
+    }
+}
+
+/// Complete the leaf of `arg` against the directory it points into, keeping
+/// each candidate's [match_score], best-first. When `dirs_only` is set only
+/// subdirectories are offered (used by `cd`); otherwise files are offered too
+/// and directory names get a trailing `/` so completing into a subdirectory
+/// continues naturally.
 fn scored_paths(
     arg: &str,
     cwd: &Path,
@@ -737,5 +1126,172 @@ mod descendant_completion_tests {
         let _ = fs::remove_dir_all(&root);
         assert_eq!(result.candidates.len(), 1);
         assert_eq!(result.candidates[0].replacement, "plascad_local");
+    }
+}
+
+#[cfg(test)]
+mod saved_dir_completion_tests {
+    use super::*;
+
+    /// A home with `~/strike/White Wedding/{ew-debrief, wsv-tool}`, the
+    /// latter bookmarked, and a cwd elsewhere. Returns (home, cwd, bookmark).
+    fn setup(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let home = std::env::temp_dir().join(name);
+        let _ = fs::remove_dir_all(&home);
+        let ww = home.join("strike").join("White Wedding");
+        fs::create_dir_all(ww.join("ew-debrief").join("src")).unwrap();
+        fs::create_dir_all(ww.join("wsv-tool")).unwrap();
+        let cwd = home.join("elsewhere");
+        fs::create_dir_all(&cwd).unwrap();
+        (home, cwd, ww)
+    }
+
+    fn sources<'a>(
+        cwd: &'a Path,
+        home: &'a Path,
+        bookmarks: &'a [PathBuf],
+        history: &'a [HistoryItem],
+    ) -> CompletionSources<'a> {
+        CompletionSources {
+            cwd,
+            home: Some(home),
+            bookmarks,
+            recent_dirs: &[],
+            clone_roots: &[],
+            history,
+            remote: false,
+        }
+    }
+
+    #[test]
+    fn hint_suggests_tabs_only_completion() {
+        let (home, cwd, ww) = setup("shell_completion_test_hint");
+        let bookmarks = std::slice::from_ref(&ww);
+        let src = sources(&cwd, &home, bookmarks, &[]);
+        let hint = |line: &str| input_hint(line, line.len(), &src);
+        let ew = hint("cd ~/strike/White Wedding/ew");
+        let ew_case = hint("cd ~/strike/white wedding/EW");
+        let under_bookmark = hint("cd wedding/ew");
+        let bookmark = hint("cd wedd");
+        let ambiguous = hint("cd ~/strike/White Wedding/");
+        let done = hint("cd ~/strike/White Wedding/ew-debrief");
+        let mid_line = input_hint("cd ~/strike/White Wedding/ew", 5, &src);
+        let remote = input_hint(
+            "cd wedd",
+            7,
+            &CompletionSources {
+                remote: true,
+                ..src
+            },
+        );
+        let _ = fs::remove_dir_all(&home);
+
+        let hint = |display: &str, line: &str| {
+            Some(InputHint {
+                display: display.to_string(),
+                line: line.to_string(),
+            })
+        };
+        assert_eq!(ew, hint("-debrief", "cd ~/strike/White Wedding/ew-debrief"));
+        assert_eq!(
+            ew_case,
+            hint("-debrief", "cd ~/strike/white wedding/ew-debrief")
+        );
+        // Tab rewrites these, so the suggestion shows what they become.
+        assert_eq!(
+            under_bookmark,
+            hint(
+                " → ~/strike/White Wedding/ew-debrief",
+                "cd ~/strike/White Wedding/ew-debrief"
+            )
+        );
+        assert_eq!(
+            bookmark,
+            hint(" → ~/strike/White Wedding", "cd ~/strike/White Wedding")
+        );
+        assert_eq!(ambiguous, None);
+        assert_eq!(done, None);
+        assert_eq!(mid_line, None);
+        assert_eq!(remote, None);
+    }
+
+    #[test]
+    fn history_hint_comes_first() {
+        let (home, cwd, ww) = setup("shell_completion_test_hint_history");
+        let history = vec![HistoryItem {
+            text: "cd ~/strike/White Wedding/ew-debrief/src".to_string(),
+            dir: cwd.clone(),
+            dt: chrono::Utc::now(),
+        }];
+        let bookmarks = std::slice::from_ref(&ww);
+        let src = sources(&cwd, &home, bookmarks, &history);
+        let line = "cd ~/strike/White Wedding/ew";
+        let from_history = input_hint(line, line.len(), &src);
+        // The newest match being the line itself suggests nothing from
+        // history, so the completion is suggested.
+        let line = "cd ~/strike/White Wedding/ew-debrief/src";
+        let exact = input_hint(line, line.len(), &src);
+        let _ = fs::remove_dir_all(&home);
+        assert_eq!(
+            from_history.map(|h| h.display),
+            Some("-debrief/src".to_string())
+        );
+        assert_eq!(exact, None);
+    }
+
+    #[test]
+    fn tab_completes_under_bookmark_by_name() {
+        let (home, cwd, ww) = setup("shell_completion_test_under_bookmark");
+        let line = "cd wedding/ew";
+        let result = complete_cd_path(
+            line,
+            line.len(),
+            &cwd,
+            Some(&home),
+            std::slice::from_ref(&ww),
+            &[],
+        )
+        .unwrap();
+        let _ = fs::remove_dir_all(&home);
+        assert_eq!(result.candidates.len(), 1);
+        assert_eq!(
+            result.candidates[0].replacement,
+            "~/strike/White Wedding/ew-debrief"
+        );
+    }
+
+    #[test]
+    fn tab_completes_under_recent_dir_by_name() {
+        let (home, cwd, ww) = setup("shell_completion_test_under_recent");
+        let recent = vec![RecentDir {
+            path: ww.join("ew-debrief"),
+            dt: chrono::Utc::now(),
+        }];
+        let line = "cd debrief/s";
+        let result = complete_cd_path(line, line.len(), &cwd, Some(&home), &[], &recent).unwrap();
+        let _ = fs::remove_dir_all(&home);
+        assert_eq!(result.candidates.len(), 1);
+        assert_eq!(
+            result.candidates[0].replacement,
+            "~/strike/White Wedding/ew-debrief/src"
+        );
+    }
+
+    #[test]
+    fn enter_goes_where_tab_completes() {
+        let (home, cwd, ww) = setup("shell_completion_test_resolve");
+        fs::create_dir_all(ww.join("synthetic-a")).unwrap();
+        fs::create_dir_all(ww.join("synthetic-b")).unwrap();
+        let bookmarks = std::slice::from_ref(&ww);
+        let resolve = |args: &str| util::resolve_cd(Some(&home), &cwd, bookmarks, &[], args);
+        let tilde = resolve("~/strike/White Wedding/ew");
+        let named = resolve("wedding/ew");
+        let ambiguous = resolve("~/strike/White Wedding/synth");
+        let nothing = resolve("~/strike/White Wedding/zzz");
+        let _ = fs::remove_dir_all(&home);
+        assert_eq!(tilde, Ok(ww.join("ew-debrief")));
+        assert_eq!(named, Ok(ww.join("ew-debrief")));
+        assert!(ambiguous.is_err_and(|e| e.contains("synthetic-a") && e.contains("synthetic-b")));
+        assert_eq!(nothing, Ok(home.join("strike/White Wedding/zzz")));
     }
 }
