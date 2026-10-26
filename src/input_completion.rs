@@ -115,7 +115,8 @@ fn complete_ranked(
 }
 
 /// The greyed suggestion shown after the caret, which →, End and Ctrl+E
-/// accept. See [input_hint].
+/// accept, as does Enter on a `cd` line (see [HintCache::line_for_enter]).
+/// See [input_hint].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InputHint {
     /// What's shown: the rest of the line, or, for a completion that rewrites
@@ -213,6 +214,25 @@ impl HintCache {
             Some((l, _, _, hint)) if l == line => hint.as_ref(),
             _ => None,
         }
+    }
+
+    /// What Enter runs in place of `line`, if anything: for a `cd` whose
+    /// argument isn't a directory as written, the suggestion's line, so Enter
+    /// goes where → then Enter would.
+    pub fn line_for_enter(&mut self, line: &str, src: &CompletionSources) -> Option<String> {
+        let (_, arg) = cd_arg(line, line.len())?;
+        let arg = arg.trim();
+        // `cd 3` is a recent dir by number, and a remote's dirs aren't here.
+        if src.remote
+            || arg.parse::<usize>().is_ok()
+            || util::path_from_args(src.home, src.cwd, &[], arg).is_dir()
+        {
+            return None;
+        }
+
+        self.get(line, line.len(), src)
+            .map(|hint| hint.line)
+            .filter(|l| cd_arg(l, l.len()).is_some())
     }
 }
 

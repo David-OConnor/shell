@@ -828,6 +828,13 @@ fn main() {
 
         match result {
             Ok(line) => {
+                let line = rl
+                    .helper()
+                    .and_then(|h| {
+                        h.with_sources(|src| hints.lock().ok()?.line_for_enter(&line, src))
+                    })
+                    .flatten()
+                    .unwrap_or(line);
                 if let Ok(mut n) = hist_nav.lock() {
                     n.reset();
                 }
