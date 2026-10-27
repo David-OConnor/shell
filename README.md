@@ -62,6 +62,7 @@ somewhere convenient, and add it to the system path; then you can launch by typi
 - `run`, `build`, `fmt`: Shorthand for `cargo run`, `cargo build`, `cargo +nightly fmt`. `run release` runs `cargo run --release`.
 - `rm_targets`: Find cargo `target` folders under the current directory, and delete them after confirming.
 - `open`: Open the current directory in the OS file browser.
+- `root`: Go to the root of the Git, Cargo or Python project you're in.
 
 - Use the arrow keys to navigate to recent items
 - Press Tab to autocomplete
@@ -223,6 +224,7 @@ also works on Windows.
 - `bm <letters>`: Go to a bookmark whose path contains those letters.
 - `cd <letters>`: Go to a bookmarked or recent directory whose path contains those letters, or else a standard directory (e.g. `/etc`, `C:\Program Files`) whose name does.
 - `cd <part-of-path>` + Tab key: Go to this directory history item
+- `root`: Go to the root of the Git, Cargo or Python project you're in.
 
 
 ### SSH

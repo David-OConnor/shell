@@ -24,8 +24,8 @@ use std::{
 
 use crate::{
     DirList, RecentDir, clone_root, expand_clone, find_bookmark, find_history_index,
-    path_from_args, quiet_command, record_clone_root, remove_saved_dir, resolve_cd, ssh,
-    stale_dir_list,
+    path_from_args, quiet_command, record_clone_root, remove_saved_dir, resolve_cd, resolve_root,
+    ssh, stale_dir_list,
     state::State,
     util::{confirm, render_with_tilde},
 };
@@ -462,7 +462,7 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
     // Track directories we've run real commands from (everything except `cd`),
     // so Ctrl+2 / `cd <number>` can jump back to them. We always save below
     // regardless, to flush the new history entry to disk.
-    if cmd != "cd" {
+    if !matches!(cmd, "cd" | "root") {
         let cwd = state.cwd.clone();
         crate::record_recent_dir(&state.recent_dirs, &cwd);
     }
@@ -538,6 +538,11 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
             // Opens a local window; there's no remote equivalent.
             "open" => {
                 eprintln!("open: only runs locally; disconnect first");
+                return true;
+            }
+            // Finds the project on the local disk.
+            "root" => {
+                eprintln!("root: only runs locally; disconnect first");
                 return true;
             }
             _ => Some(input.to_string()),
@@ -712,6 +717,15 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
                 None => eprintln!("bm: no matching bookmark for `{args}`"),
             }
         }
+
+        // The GUI's Project root button.
+        "root" => match resolve_root(&state.cwd) {
+            Ok(root) => match env::set_current_dir(&root) {
+                Ok(_) => state.cwd = env::current_dir().unwrap_or(root),
+                Err(e) => eprintln!("root: {e}"),
+            },
+            Err(e) => eprintln!("root: {e}"),
+        },
 
         // Everything else: Pass through to the system shell (e.g. the one which we launched this
         // application from). Shorthands, including venv `python`/`pip`, were
@@ -905,6 +919,10 @@ pub fn shelp_text(frontend: Frontend) -> String {
         (
             "cd <letters>",
             "Go to a bookmark or recent path containing this text",
+        ),
+        (
+            "root",
+            "Go to the root of the Git, Cargo or Python project this directory is in",
         ),
         ("bm <number>", "Go to a bookmark by its index"),
         ("bm <letters>", "Go to a bookmark containing this text"),

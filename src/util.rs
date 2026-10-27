@@ -13,6 +13,7 @@ use std::{
 use crate::{
     common_dirs::common_dirs,
     input_completion::cd_completion_target,
+    python::venv_python,
     state::{BrowserFile, HistoryItem, RecentDir},
 };
 
@@ -220,6 +221,30 @@ pub fn resolve_cd(
     match cd_completion_target(args, cwd, home, bookmarks, recent_dirs) {
         Ok(found) => Ok(found.unwrap_or(target)),
         Err(names) => Err(format!("`{args}` could be any of: {}", names.join("   "))),
+    }
+}
+
+/// The nearest Git, Cargo or Python project containing `dir`, including
+/// `dir` itself. A `.git` file counts too, for worktrees and submodules.
+pub fn project_root(dir: &Path) -> Option<PathBuf> {
+    let is_root = |dir: &Path| {
+        dir.join(".git").exists()
+            || ["Cargo.toml", "pyproject.toml", "setup.py", "manage.py"]
+                .iter()
+                .any(|m| dir.join(m).is_file())
+            || venv_python(dir).is_some()
+    };
+
+    dir.ancestors().find(|d| is_root(d)).map(Path::to_path_buf)
+}
+
+/// Where `root` goes: the [project_root] of `cwd`. `Err` when `cwd` is in no
+/// project, or is its root.
+pub fn resolve_root(cwd: &Path) -> Result<PathBuf, String> {
+    match project_root(cwd) {
+        None => Err("not in a Git, Cargo or Python project".to_owned()),
+        Some(root) if root == cwd => Err("already at the project root".to_owned()),
+        Some(root) => Ok(root),
     }
 }
 

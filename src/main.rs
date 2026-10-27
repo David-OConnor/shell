@@ -86,6 +86,7 @@ const BUILTINS: &[&str] = &[
     "--version",
     "-v",
     "cd",
+    "root",
     "bm",
     "cat",
     "del",

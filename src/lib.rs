@@ -28,7 +28,7 @@ pub use state::{
 pub use util::{
     DISP_PAGE_LEN, DIVIDER, DirList, dir_missing, find_bookmark, find_cd_fallback,
     find_history_index, get_home, history_indices_in_dir, history_latest_indices, page_count,
-    path_from_args, quiet_command, read_browser_files, remove_missing_recent_dirs,
-    remove_saved_dir, render_history, render_history_in_dir, render_page, resolve_cd,
+    path_from_args, project_root, quiet_command, read_browser_files, remove_missing_recent_dirs,
+    remove_saved_dir, render_history, render_history_in_dir, render_page, resolve_cd, resolve_root,
     stale_dir_list,
 };
