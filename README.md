@@ -279,6 +279,15 @@ to step to the next (older) page, wrapping back to the first page after the
 last. For history, `his p<number>` or `this p<number>` jumps straight to a page.
 
 
+### Common directories
+- **Alt + `**: Go to the home directory.
+- **Alt + 1** / **Alt + 2**: Go to Desktop / Downloads.
+- **Alt + 3**: Go to AppData. `~/Library` on Mac, `~/.local` on Linux.
+- **Alt + 4**: Go to Program Files. `/Applications` on Mac, `/usr` on Linux.
+
+On Mac, set the terminal to use Option as Meta.
+
+
 ### General terminal commands
 Standard line-editing shortcuts, provided by the underlying line editor:
 

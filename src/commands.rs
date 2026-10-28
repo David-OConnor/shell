@@ -1041,8 +1041,8 @@ pub fn shelp_text(frontend: Frontend) -> String {
         ),
     ]);
 
-    let keys: &[(&str, &str)] = if cli {
-        &[
+    let mut keys: Vec<(&str, &str)> = if cli {
+        vec![
             ("Enter", "Run the input"),
             (
                 "Tab",
@@ -1074,7 +1074,7 @@ pub fn shelp_text(frontend: Frontend) -> String {
             ("Ctrl + D", "Exit"),
         ]
     } else {
-        &[
+        vec![
             ("Enter", "Run the input"),
             (
                 "Tab",
@@ -1096,10 +1096,29 @@ pub fn shelp_text(frontend: Frontend) -> String {
         ]
     };
 
+    // See [crate::folder_key_dirs]. After Ctrl + B.
+    let folders = if cfg!(windows) {
+        "Go to AppData / Program Files"
+    } else if cfg!(target_os = "macos") {
+        "Go to ~/Library / /Applications"
+    } else {
+        "Go to ~/.local / /usr"
+    };
+    let folder_keys = [
+        ("Alt + `", "Go to the home directory"),
+        ("Alt + 1 / 2", "Go to Desktop / Downloads"),
+        ("Alt + 3 / 4", folders),
+    ];
+    let at = keys
+        .iter()
+        .position(|(k, _)| *k == "Ctrl + B")
+        .map_or(keys.len(), |i| i + 1);
+    keys.splice(at..at, folder_keys);
+
     let mut out = format!("\n{}\n\nCommands:\n", version_line());
     push_help_rows(&mut out, &commands);
     out.push_str("\nKey shortcuts:\n");
-    push_help_rows(&mut out, keys);
+    push_help_rows(&mut out, &keys);
     if cli {
         out.push_str(
             "\nPress a list's keystroke again to page back through older entries.\n\

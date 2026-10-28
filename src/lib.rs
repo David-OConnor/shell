@@ -13,6 +13,7 @@ pub mod ssh;
 pub mod state;
 mod util;
 
+pub use common_dirs::folder_key_dirs;
 pub use git::{BRANCH_PREFIX, clone_root, current_branch, expand_clone, truncate_branch};
 pub use input_completion::{
     CompletionCandidate, CompletionResult, CompletionSources, HintCache, InputHint,

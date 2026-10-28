@@ -94,6 +94,36 @@ pub fn common_dirs(home: Option<&Path>) -> Vec<PathBuf> {
     dirs
 }
 
+/// Where Alt + `, 1, 2, 3 and 4 go, as do Peregrine's Files panel buttons:
+/// home, Desktop, Downloads, per-user app data (`AppData`, `~/Library` or
+/// `~/.local`) and installed programs (`Program Files`, `/Applications` or
+/// `/usr`).
+pub fn folder_key_dirs(home: Option<&Path>) -> [Option<PathBuf>; 5] {
+    let app_data = if cfg!(windows) {
+        "AppData"
+    } else if cfg!(target_os = "macos") {
+        "Library"
+    } else {
+        ".local"
+    };
+    let programs = if cfg!(windows) {
+        env::var_os("ProgramFiles")
+            .map_or_else(|| PathBuf::from(r"C:\Program Files"), PathBuf::from)
+    } else if cfg!(target_os = "macos") {
+        PathBuf::from("/Applications")
+    } else {
+        PathBuf::from("/usr")
+    };
+
+    [
+        home.map(Path::to_path_buf),
+        home.map(|h| user_folder(h, "Desktop")),
+        home.map(|h| user_folder(h, "Downloads")),
+        home.map(|h| h.join(app_data)),
+        Some(programs),
+    ]
+}
+
 /// `~/<folder>`, or on Windows its OneDrive copy when OneDrive backup has
 /// moved it there.
 fn user_folder(home: &Path, folder: &str) -> PathBuf {

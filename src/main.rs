@@ -477,6 +477,48 @@ impl ConditionalEventHandler for BookmarkHandler {
     }
 }
 
+/// Rustyline key handler for Alt + `, 1, 2, 3 and 4: goes to one of
+/// [shell::folder_key_dirs], keeping what's typed. Like the bookmark handler,
+/// it interrupts so the main loop changes dir and redraws the prompt.
+struct FolderKeyHandler {
+    dir: Option<PathBuf>,
+    remote: Arc<AtomicBool>,
+    printer: SharedPrinter,
+    nav: Arc<Mutex<CliNav>>,
+}
+
+impl ConditionalEventHandler for FolderKeyHandler {
+    fn handle(
+        &self,
+        _evt: &Event,
+        _n: RepeatCount,
+        _positive: bool,
+        ctx: &EventContext<'_>,
+    ) -> Option<Cmd> {
+        let msg = if self.remote.load(Ordering::Relaxed) {
+            "cd: only runs locally; disconnect first\n".to_string()
+        } else {
+            match &self.dir {
+                Some(dir) if dir.is_dir() => {
+                    let mut nav = self.nav.lock().ok()?;
+                    nav.pending_cd = Some(dir.clone());
+                    nav.pending_restart = Some(ctx.line().to_string());
+                    return Some(Cmd::Interrupt);
+                }
+                Some(dir) => format!("cd: {} doesn't exist\n", dir.display()),
+                None => return Some(Cmd::Noop),
+            }
+        };
+        if let Ok(mut p) = self.printer.lock() {
+            let _ = p.print(msg);
+        }
+
+        // Consumed either way: rustyline's own Alt + digit starts a repeat
+        // count.
+        Some(Cmd::Noop)
+    }
+}
+
 /// Which paginated list a Ctrl+1 through Ctrl+5 keystroke opens.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum NavKind {
@@ -504,6 +546,8 @@ enum NavAxis {
 struct CliNav {
     nav: NavState,
     pending_restart: Option<String>,
+    /// Where a [FolderKeyHandler] asked to go, before the next prompt.
+    pending_cd: Option<PathBuf>,
 }
 
 impl CliNav {
@@ -511,12 +555,14 @@ impl CliNav {
         Self {
             nav: NavState::new(),
             pending_restart: None,
+            pending_cd: None,
         }
     }
 
     fn reset(&mut self) {
         self.nav.reset();
         self.pending_restart = None;
+        self.pending_cd = None;
     }
 }
 
@@ -759,6 +805,21 @@ fn main() {
         show_list(NavKind::HistoryInDir),
     );
 
+    // Alt + `, 1, 2, 3, 4: go home, or to Desktop, Downloads, app data or
+    // programs, as Peregrine's Files panel buttons do.
+    let folder_dirs = shell::folder_key_dirs(home.as_deref());
+    for (key, dir) in ['`', '1', '2', '3', '4'].into_iter().zip(folder_dirs) {
+        rl.bind_sequence(
+            KeyEvent::new(key, Modifiers::ALT),
+            EventHandler::Conditional(Box::new(FolderKeyHandler {
+                dir,
+                remote: remote.clone(),
+                printer: printer.clone(),
+                nav: hist_nav.clone(),
+            })),
+        );
+    }
+
     // Arrow-key recall: ↑/↓ walk `state.history`; ←/→ walk `state.recent_dirs`.
     // All four bail out via Cmd::Interrupt so the main loop can rebuild the
     // prompt with a `his N` / `cd N` indicator (rustyline can't change a
@@ -806,6 +867,14 @@ fn main() {
     }
 
     loop {
+        // A folder key asked to go somewhere; go before building the prompt.
+        let pending_cd = hist_nav.lock().ok().and_then(|mut n| n.pending_cd.take());
+        if let Some(dir) = pending_cd
+            && let Err(e) = state.change_dir(dir)
+        {
+            eprintln!("cd: {e}");
+        }
+
         // Snapshot the nav state for this iteration. If a previous arrow
         // press left us with `pending_restart`, we use it as `readline`'s
         // initial buffer and bake the matching `his N` / `cd N` into the

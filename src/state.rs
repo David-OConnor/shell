@@ -154,6 +154,17 @@ impl State {
         }
     }
 
+    /// Go to `dir` from outside a command: a folder key (see
+    /// [crate::folder_key_dirs]).
+    pub fn change_dir(&mut self, dir: PathBuf) -> io::Result<()> {
+        env::set_current_dir(&dir)?;
+        self.cwd = env::current_dir().unwrap_or(dir);
+        self.refresh_branch();
+        self.refresh_browser_files();
+
+        Ok(())
+    }
+
     /// Persist user-controlled state (bookmarks + recent dirs + history +
     /// remote terminals + clone roots) to the given file. Called after every
     /// mutation of any of them. Locks in the order bookmarks → recent_dirs →
