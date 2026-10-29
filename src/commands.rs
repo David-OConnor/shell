@@ -16,7 +16,7 @@
 
 use std::{
     env,
-    fs::File,
+    fs::{self, File},
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
@@ -253,6 +253,126 @@ pub fn open_dir(dir: &Path, sink: OutputSink) {
             format!("open: failed to run {launcher}: {e}"),
         ),
     }
+}
+
+/// The `.gitignore` `rust new` writes, in place of the one `cargo new` does.
+const NEW_GITIGNORE: &str = "/target\nCargo.lock\n\n# IDE\n.idea\n";
+
+/// The `rustfmt.toml` `rust new` writes.
+const NEW_RUSTFMT: &str = "imports_granularity = \"Crate\"\ngroup_imports = \"StdExternalCrate\"\n";
+
+/// `cargo new` options whose value is the next argument, so [new_package_path]
+/// doesn't take the value for the path.
+const CARGO_NEW_VALUE_FLAGS: &[&str] = &[
+    "--vcs",
+    "--edition",
+    "--name",
+    "--registry",
+    "--color",
+    "--config",
+    "-Z",
+];
+
+/// Implements `rust new <path> [options]`: runs `cargo new` under `cwd`, with
+/// the options (`--lib`, `--name`, …) passed through, then replaces the package's
+/// `.gitignore` with [NEW_GITIGNORE] and adds [NEW_RUSTFMT] and a placeholder
+/// `README.md` titled with the package name. As for [sync], cargo's output is
+/// captured and goes through `sink`.
+pub fn rust(args: &str, cwd: &Path, sink: OutputSink) {
+    const USAGE: &str = "rust: usage: rust new <path> [cargo new options]";
+
+    let mut words = args.split_whitespace();
+    if words.next() != Some("new") {
+        sink(OutKind::Stderr, USAGE.to_string());
+        return;
+    }
+    let args: Vec<&str> = words.collect();
+    let Some(path) = new_package_path(&args) else {
+        sink(OutKind::Stderr, USAGE.to_string());
+        return;
+    };
+
+    match quiet_command("cargo")
+        .arg("new")
+        .args(&args)
+        .current_dir(cwd)
+        .output()
+    {
+        Ok(out) => {
+            if !out.stdout.is_empty() {
+                sink(
+                    OutKind::Stdout,
+                    String::from_utf8_lossy(&out.stdout).into_owned(),
+                );
+            }
+            if !out.stderr.is_empty() {
+                sink(
+                    stderr_kind(out.status),
+                    String::from_utf8_lossy(&out.stderr).into_owned(),
+                );
+            }
+            if !out.status.success() {
+                sink(OutKind::Stderr, "rust new: `cargo new` failed".to_string());
+                return;
+            }
+        }
+        Err(e) => {
+            sink(
+                OutKind::Stderr,
+                format!("rust new: failed to run cargo: {e}"),
+            );
+            return;
+        }
+    }
+
+    let dir = cwd.join(path);
+    // `--name` can make the package name differ from the directory's.
+    let name = package_name(&dir).unwrap_or_else(|| {
+        dir.file_name()
+            .map_or(path.to_owned(), |n| n.to_string_lossy().into_owned())
+    });
+    let files = [
+        (".gitignore", NEW_GITIGNORE.to_owned()),
+        ("rustfmt.toml", NEW_RUSTFMT.to_owned()),
+        ("README.md", format!("# {name}\n\n(placeholder)\n")),
+    ];
+    for (file, contents) in files {
+        if let Err(e) = fs::write(dir.join(file), contents) {
+            sink(
+                OutKind::Stderr,
+                format!("rust new: failed to write {file}: {e}"),
+            );
+            return;
+        }
+    }
+    sink(
+        OutKind::Stdout,
+        "Added .gitignore, rustfmt.toml and README.md".to_string(),
+    );
+}
+
+/// The path in `cargo new`'s arguments: the first that's neither an option nor
+/// an option's value.
+fn new_package_path<'a>(args: &[&'a str]) -> Option<&'a str> {
+    let mut args = args.iter();
+    while let Some(&arg) = args.next() {
+        if CARGO_NEW_VALUE_FLAGS.contains(&arg) {
+            args.next();
+        } else if !arg.starts_with('-') {
+            return Some(arg);
+        }
+    }
+    None
+}
+
+/// The package name in `dir`'s `Cargo.toml`: its first `name = "…"` line,
+/// which is the `[package]` one in what `cargo new` writes.
+fn package_name(dir: &Path) -> Option<String> {
+    let manifest = fs::read_to_string(dir.join("Cargo.toml")).ok()?;
+    manifest.lines().find_map(|line| {
+        let value = line.strip_prefix("name")?.trim_start().strip_prefix('=')?;
+        Some(value.trim().trim_matches('"').to_owned())
+    })
 }
 
 /// Bare commands that are shorthand for the `git` subcommand of the same name,
@@ -545,6 +665,11 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
                 eprintln!("root: only runs locally; disconnect first");
                 return true;
             }
+            // Writes the new package's files on the local disk.
+            "rust" => {
+                eprintln!("rust: only runs locally; disconnect first");
+                return true;
+            }
             _ => Some(input.to_string()),
         };
 
@@ -592,6 +717,18 @@ pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
                 }
             };
             logs(args, true, &mut sink);
+        }
+
+        "rust" => {
+            let cwd = state.cwd.clone();
+            let mut sink = |kind, msg: String| {
+                let msg = msg.trim_end_matches('\n');
+                match kind {
+                    OutKind::Stdout => println!("{msg}"),
+                    OutKind::Stderr | OutKind::StderrOk => eprintln!("{msg}"),
+                }
+            };
+            rust(args, &cwd, &mut sink);
         }
 
         "rm_targets" => crate::cargo_targets::rm_targets(&state.cwd),
@@ -977,6 +1114,10 @@ pub fn shelp_text(frontend: Frontend) -> String {
             "run, build, fmt",
             "Shorthand for `cargo run`, `cargo build`, `cargo +nightly fmt`. `run release` adds `--release`",
         ),
+        (
+            "rust new <path>",
+            "`cargo new`, then a `.gitignore` that also ignores Cargo.lock and .idea, a `rustfmt.toml`, and a placeholder README. Options such as `--lib` are passed through",
+        ),
     ]);
     // CLI-only: it asks for confirmation on stdin, which the GUI doesn't route.
     if cli {
@@ -1187,5 +1328,63 @@ mod tests {
         let e = expand_input("ls -la", None, None);
         assert_eq!(e.line, "ls -la");
         assert!(!e.echo);
+    }
+
+    #[test]
+    fn finds_new_package_path() {
+        assert_eq!(new_package_path(&["foo"]), Some("foo"));
+        assert_eq!(new_package_path(&["--lib", "foo"]), Some("foo"));
+        assert_eq!(new_package_path(&["--name", "bar", "foo"]), Some("foo"));
+        assert_eq!(
+            new_package_path(&["--edition=2021", "-q", "a/foo", "--lib"]),
+            Some("a/foo")
+        );
+        assert_eq!(new_package_path(&["--lib"]), None);
+        assert_eq!(new_package_path(&[]), None);
+    }
+
+    #[test]
+    fn rust_new_writes_template() {
+        let cwd = env::temp_dir().join(format!("shell_rust_new_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&cwd);
+        fs::create_dir_all(&cwd).unwrap();
+
+        // Without `--vcs none`, cargo writes a `.gitignore` of its own to replace.
+        let mut errors = Vec::new();
+        rust("new --lib --name renamed pkg", &cwd, &mut |kind, msg| {
+            if kind == OutKind::Stderr {
+                errors.push(msg);
+            }
+        });
+        let read = |file: &str| fs::read_to_string(cwd.join("pkg").join(file)).unwrap();
+        let results = (
+            errors,
+            read(".gitignore"),
+            read("rustfmt.toml"),
+            read("README.md"),
+            cwd.join("pkg/src/lib.rs").is_file(),
+        );
+        let _ = fs::remove_dir_all(&cwd);
+
+        let (errors, gitignore, rustfmt, readme, lib) = results;
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(gitignore, NEW_GITIGNORE);
+        assert_eq!(rustfmt, NEW_RUSTFMT);
+        assert_eq!(readme, "# renamed\n\n(placeholder)\n");
+        assert!(lib);
+    }
+
+    #[test]
+    fn rust_needs_new_and_a_path() {
+        for args in ["", "init foo", "new", "new --lib"] {
+            let mut errors = Vec::new();
+            rust(args, &env::temp_dir(), &mut |kind, msg| {
+                if kind == OutKind::Stderr {
+                    errors.push(msg);
+                }
+            });
+            assert_eq!(errors.len(), 1, "{args}");
+            assert!(errors[0].contains("usage"), "{args}");
+        }
     }
 }

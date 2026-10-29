@@ -106,6 +106,7 @@ const BUILTINS: &[&str] = &[
     "run",
     "build",
     "fmt",
+    "rust",
     "rm_targets",
     "open",
     "logs",

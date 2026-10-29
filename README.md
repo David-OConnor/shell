@@ -60,6 +60,7 @@ somewhere convenient, and add it to the system path; then you can launch by typi
 - `clone <name>`: After one clone by full URL, e.g. `clone https://github.com/david-oconnor/shell`, clone
   other repos from the same place by name: `clone lin_alg`.
 - `run`, `build`, `fmt`: Shorthand for `cargo run`, `cargo build`, `cargo +nightly fmt`. `run release` runs `cargo run --release`.
+- `rust new <name>`: `cargo new`, plus a `.gitignore` that also ignores `Cargo.lock` and `.idea`, a `rustfmt.toml`, and a placeholder README.
 - `rm_targets`: Find cargo `target` folders under the current directory, and delete them after confirming.
 - `open`: Open the current directory in the OS file browser.
 - `root`: Go to the root of the Git, Cargo or Python project you're in.
@@ -207,6 +208,7 @@ Run `logs <service>`, to view the recent Journalctl logs. Linux only. For exampl
 - `pull`, `push`, `branch`, `commit`, `checkout`, `switch`, `clone`, and `stash`: Aliases for `git pull`, `git push`, etc.
 - `clone <name>`: Clone a repo by name, from the root of the last repo you cloned by full URL.
 - `run`, `build`, and `fmt`: Aliases for `cargo run`, `cargo build`, and `cargo +nightly fmt`. `run release` runs `cargo run --release`.
+- `rust new <name>`: Run `cargo new <name>`, then replace its `.gitignore` with one that also ignores `Cargo.lock` and `.idea`, and add a `rustfmt.toml` (crate-level import granularity, std/external/crate import groups) and a `README.md` with the package name as its title. Options such as `--lib` are passed through to `cargo new`.
 - `rm_targets`: Find cargo `target` folders under the current directory, list them with their sizes in GB, show the total that would be freed, and delete them after you confirm.
 - `open`: Open the current directory in the OS file browser: Explorer on Windows, or the default file manager (e.g. Nautilus on Gnome) via `xdg-open` on Linux.
 - `logs`: Runs journalctl -u -f with the service.
