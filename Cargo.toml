@@ -1,0 +1,58 @@
+[package]
+name = "shell"
+version = "0.1.1"
+edition = "2024"
+
+# Keep the vendored (patched) rustyline out of this package's workspace.
+[workspace]
+exclude = ["vendor"]
+
+# Vendored copy of rustyline 18.0.0 with one local patch (src/tty/windows.rs):
+# the Windows console reports no character for Ctrl+digit, and upstream drops
+# those key events, so Ctrl+1..Ctrl+4 could never reach our bindings. The
+# patch recovers the digit from the virtual key code. Windows-only: Unix
+# terminals cannot transmit Ctrl+digit at all.
+[patch.crates-io]
+rustyline = { path = "vendor/rustyline" }
+
+[dependencies]
+chrono = "0.4.44"
+
+# Hmm. What's this for?
+rustyline = "18.0.0"
+crossterm = "0.29.0"
+
+# `keyring` (SSH password storage) is listed per platform in the `[target...]`
+# sections below: its backends have different system requirements, so the
+# feature set can't be shared.
+
+# For use with ssh. Default features pull `aws-lc-rs`, whose `aws-lc-sys`
+# build needs NASM + a C toolchain on Windows. Use the pure-Rust-ish `ring` crypto backend instead
+# (vendored asm, no NASM), keeping compression (`flate2`) and RSA key support.
+russh = { version = "0.61.2", default-features = false, features = ["ring", "flate2", "rsa"] }
+# Required for russh.
+tokio = { version = "1.52.3", features = ["rt", "io-util", "macros", "sync", "rt-multi-thread", "net", "time"] }
+
+# Both of these are for ignoring Ctrl+C in the shell process itself, so it
+# interrupts the launched child process without also killing the shell.
+# Already in the dependency tree transitively; versions kept in sync with that.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+# Windows Credential Manager.
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Kernel keyutils, not the DBus Secret Service. Secret Service needs
+# `libdbus-1-dev` at build time and a running secret-service daemon at run
+# time; neither is present in a bare WSL/container/headless install, so
+# enabling it broke the Linux build outright. keyutils is in the kernel and
+# always available. Trade-off: keys live in the session keyring, so saved SSH
+# passwords are forgotten on logout rather than persisting.
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["linux-native"] }
+
+# macOS Keychain.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }

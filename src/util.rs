@@ -1,0 +1,581 @@
+//! Misc utility functionality.
+
+use std::{
+    collections::HashSet,
+    env,
+    ffi::OsStr,
+    fs,
+    io::{self, Write},
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+use crate::{
+    common_dirs::common_dirs,
+    input_completion::cd_completion_target,
+    python::venv_python,
+    state::{BrowserFile, HistoryItem, RecentDir},
+};
+
+/// Horizontal rule framing the paginated lists (history, recent dirs,
+/// bookmarks, remotes) in the CLI.
+pub const DIVIDER: &str = "----------";
+
+/// How many items each paginated list shows per page.
+pub const DISP_PAGE_LEN: usize = 20;
+
+/// Total pages needed to show `total` items at `per_page` items per page.
+/// Returns 1 when empty so the renderer can still show a "Page 1/1" frame.
+pub fn page_count(total: usize, per_page: usize) -> usize {
+    if total == 0 {
+        1
+    } else {
+        total.div_ceil(per_page)
+    }
+}
+
+/// Render one page of a list: header with paging hint + usage hint, a
+/// page of rows, and a closing divider. Page 0 = the last `per_page`
+/// items (newest at the bottom). Rows are labelled with their absolute
+/// index into `items`, so the displayed number lines up with the
+/// corresponding `<cmd> <number>` invocation. Shared by the history,
+/// recent-directories, bookmarks, and remotes lists so they all present
+/// the same frame.
+///
+/// `paging_hint` tells the user how to reach the other pages (each list
+/// has a different trigger key); it's omitted when everything fits on
+/// one page.
+#[allow(clippy::too_many_arguments)]
+pub fn render_page<T>(
+    title: &str,
+    paging_hint: &str,
+    usage_hint: &str,
+    empty_msg: &str,
+    items: &[T],
+    page: usize,
+    per_page: usize,
+    mut format_row: impl FnMut(usize, &T) -> String,
+) -> String {
+    let total = items.len();
+    let pages = page_count(total, per_page);
+    let page = page.min(pages - 1);
+
+    let paging = if pages > 1 {
+        format!("  ({paging_hint})")
+    } else {
+        String::new()
+    };
+    let mut msg = format!(
+        "\n{title}{paging}.  {usage_hint}.  Page {}/{}:\n",
+        page + 1,
+        pages
+    );
+    msg.push_str(DIVIDER);
+    msg.push('\n');
+
+    if total == 0 {
+        msg.push_str(empty_msg);
+        msg.push('\n');
+    } else {
+        let end = total - page * per_page;
+        let start = end.saturating_sub(per_page);
+
+        for (i, item) in items.iter().enumerate().take(end).skip(start) {
+            msg.push_str(&format_row(i, item));
+            msg.push('\n');
+        }
+    }
+
+    msg.push_str(DIVIDER);
+    msg.push_str("\n\n");
+    msg
+}
+
+/// Absolute history indices of the newest entry for each distinct command
+/// text, oldest first. History keeps one entry per command-in-directory (so
+/// Ctrl+4 works per directory); the all-directories view uses this to show a
+/// command run in several directories only once.
+pub fn history_latest_indices(history: &[HistoryItem]) -> Vec<usize> {
+    let mut seen = HashSet::new();
+    let mut indices: Vec<usize> = history
+        .iter()
+        .enumerate()
+        .rev()
+        .filter_map(|(i, item)| seen.insert(item.text.as_str()).then_some(i))
+        .collect();
+    indices.reverse();
+    indices
+}
+
+/// Render one page of command history. Lives in the shared lib (rather than
+/// the CLI's render module) so the Ctrl+3 key handler and the `his p<N>`
+/// builtin print the identical frame.
+pub fn render_history(history: &[HistoryItem], page: usize) -> String {
+    let indices = history_latest_indices(history);
+    render_page(
+        "Command History",
+        "Ctrl+3 again: older page",
+        "Use `his <number>` to run, `his p<N>` to jump to a page; e.g. `his 4`",
+        "(no history)",
+        &indices,
+        page,
+        DISP_PAGE_LEN,
+        |_, &i| format!("{i}:  {}", history[i].text),
+    )
+}
+
+/// Absolute history indices for commands run in `cwd`, oldest first. Keeping
+/// the original indices makes `this N` agree with the GUI's history panel.
+pub fn history_indices_in_dir(history: &[HistoryItem], cwd: &Path) -> Vec<usize> {
+    history
+        .iter()
+        .enumerate()
+        .filter_map(|(i, item)| (item.dir == cwd).then_some(i))
+        .collect()
+}
+
+pub fn render_history_in_dir(history: &[HistoryItem], cwd: &Path, page: usize) -> String {
+    let indices = history_indices_in_dir(history, cwd);
+    render_page(
+        "Command History in this directory",
+        "Ctrl+4 again: older page",
+        "Use `this <number>` to run, `this p<N>` to jump to a page; e.g. `this 4`",
+        "(no history in this directory)",
+        &indices,
+        page,
+        DISP_PAGE_LEN,
+        |_, &i| format!("{i}:  {}", history[i].text),
+    )
+}
+
+/// Resolve an absolute index or the newest case-insensitive substring match.
+/// `cwd` limits both forms to commands entered in that directory.
+pub fn find_history_index(
+    history: &[HistoryItem],
+    cwd: Option<&Path>,
+    query: &str,
+) -> Option<usize> {
+    if let Ok(i) = query.parse::<usize>() {
+        return history
+            .get(i)
+            .filter(|item| cwd.is_none_or(|dir| item.dir == dir))
+            .map(|_| i);
+    }
+    let needle = query.to_lowercase();
+    history
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, item)| {
+            cwd.is_none_or(|dir| item.dir == dir) && item.text.to_lowercase().contains(&needle)
+        })
+        .map(|(i, _)| i)
+}
+
+pub fn find_bookmark(bookmarks: &[PathBuf], query: &str) -> Option<PathBuf> {
+    best_path_match(bookmarks.iter().map(PathBuf::as_path), query).map(Path::to_path_buf)
+}
+
+/// Where `cd <query>` goes when `query` is neither a real directory nor a
+/// bookmark: a recent dir by name, then a standard directory by name (see
+/// [common_dirs]), then a recent dir with `query` anywhere in its path. A
+/// standard directory's name beats a recent dir matched only by its path, so
+/// `cd appdata` reaches `~/AppData` rather than some recent dir inside it.
+pub fn find_cd_fallback(recent: &[RecentDir], home: Option<&Path>, query: &str) -> Option<PathBuf> {
+    // Most recent first, so it wins ties.
+    let recent_hit = ranked_path_match(recent.iter().rev().map(|r| r.path.as_path()), query, true);
+    if let Some(((tier, _), p)) = recent_hit
+        && tier < PATH_TIER
+    {
+        return Some(p.to_path_buf());
+    }
+    let common = common_dirs(home);
+    ranked_path_match(common.iter().map(PathBuf::as_path), query, false)
+        .or(recent_hit)
+        .map(|(_, p)| p.to_path_buf())
+}
+
+/// Where `cd <args>` goes, `cd <number>` aside: `args` as a path or bookmark
+/// (see [path_from_args]), else a recent or standard directory (see
+/// [find_cd_fallback]), else the one directory Tab would complete it to, e.g.
+/// `~/projects/Field Notes/ana` → `~/projects/Field Notes/analysis`. `Err`
+/// names the directories it could be when Tab finds several. When nothing
+/// matches, the path comes back as written, for `cd` to report.
+pub fn resolve_cd(
+    home: Option<&Path>,
+    cwd: &Path,
+    bookmarks: &[PathBuf],
+    recent_dirs: &[RecentDir],
+    args: &str,
+) -> Result<PathBuf, String> {
+    let target = path_from_args(home, cwd, bookmarks, args);
+    if args.is_empty() || target.is_dir() {
+        return Ok(target);
+    }
+    // `~/x` says where it is, so only its last name is completed below.
+    if !args.starts_with('~')
+        && let Some(found) = find_cd_fallback(recent_dirs, home, args)
+    {
+        return Ok(found);
+    }
+    match cd_completion_target(args, cwd, home, bookmarks, recent_dirs) {
+        Ok(found) => Ok(found.unwrap_or(target)),
+        Err(names) => Err(format!("`{args}` could be any of: {}", names.join("   "))),
+    }
+}
+
+/// The nearest Git, Cargo or Python project containing `dir`, including
+/// `dir` itself. A `.git` file counts too, for worktrees and submodules.
+pub fn project_root(dir: &Path) -> Option<PathBuf> {
+    let is_root = |dir: &Path| {
+        dir.join(".git").exists()
+            || ["Cargo.toml", "pyproject.toml", "setup.py", "manage.py"]
+                .iter()
+                .any(|m| dir.join(m).is_file())
+            || venv_python(dir).is_some()
+    };
+
+    dir.ancestors().find(|d| is_root(d)).map(Path::to_path_buf)
+}
+
+/// Where `root` goes: the [project_root] of `cwd`. `Err` when `cwd` is in no
+/// project, or is its root.
+pub fn resolve_root(cwd: &Path) -> Result<PathBuf, String> {
+    match project_root(cwd) {
+        None => Err("not in a Git, Cargo or Python project".to_owned()),
+        Some(root) if root == cwd => Err("already at the project root".to_owned()),
+        Some(root) => Ok(root),
+    }
+}
+
+/// A saved directory list a `cd` target can be picked from. When the target
+/// turns out to no longer exist, both frontends offer to remove it from its
+/// list (see [stale_dir_list]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DirList {
+    RecentDirs,
+    Bookmarks,
+}
+
+impl DirList {
+    /// The list as it reads in a sentence: "Remove ~/old from recent dirs".
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::RecentDirs => "recent dirs",
+            Self::Bookmarks => "bookmarks",
+        }
+    }
+
+    /// One entry of the list: "Keep this bookmark".
+    pub fn entry_name(self) -> &'static str {
+        match self {
+            Self::RecentDirs => "recent dir",
+            Self::Bookmarks => "bookmark",
+        }
+    }
+}
+
+/// Whether `path` is gone from disk. Not merely unreadable, or on a drive
+/// that isn't ready: those may come back, so a saved entry for one is kept.
+pub fn dir_missing(path: &Path) -> bool {
+    fs::metadata(path).is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
+}
+
+/// Remove every recent dir that's gone from disk (see [dir_missing]).
+/// Returns the removed paths, oldest first.
+pub fn remove_missing_recent_dirs(recent_dirs: &mut Vec<RecentDir>) -> Vec<PathBuf> {
+    let mut removed = Vec::new();
+    recent_dirs.retain(|r| {
+        let missing = dir_missing(&r.path);
+        if missing {
+            removed.push(r.path.clone());
+        }
+        !missing
+    });
+    removed
+}
+
+/// After a `cd` to `target` failed, the saved list to offer to remove it from:
+/// `None` unless `target` is gone from disk (see [dir_missing]) and a list
+/// holds it. `from`, the list it was picked from, wins when both do.
+pub fn stale_dir_list(
+    target: &Path,
+    from: DirList,
+    bookmarks: &[PathBuf],
+    recent_dirs: &[RecentDir],
+) -> Option<DirList> {
+    if !dir_missing(target) {
+        return None;
+    }
+    let other = match from {
+        DirList::RecentDirs => DirList::Bookmarks,
+        DirList::Bookmarks => DirList::RecentDirs,
+    };
+    [from, other].into_iter().find(|list| match list {
+        DirList::RecentDirs => recent_dirs.iter().any(|r| r.path == target),
+        DirList::Bookmarks => bookmarks.iter().any(|p| p == target),
+    })
+}
+
+/// Remove `path` from `list`. Matched by path rather than index, so a list
+/// that shifted since the entry was picked loses the right row. Returns
+/// whether it was there.
+pub fn remove_saved_dir(
+    list: DirList,
+    path: &Path,
+    bookmarks: &mut Vec<PathBuf>,
+    recent_dirs: &mut Vec<RecentDir>,
+) -> bool {
+    match list {
+        DirList::RecentDirs => {
+            let len = recent_dirs.len();
+            recent_dirs.retain(|r| r.path != path);
+            recent_dirs.len() != len
+        }
+        DirList::Bookmarks => {
+            let len = bookmarks.len();
+            bookmarks.retain(|p| p != path);
+            bookmarks.len() != len
+        }
+    }
+}
+
+/// Ask a yes/no question on stdin. Only `y` or `yes` (any case) count as yes,
+/// so a stray Enter, or end of input, takes the cautious answer.
+pub(crate) fn confirm(question: &str) -> bool {
+    print!("{question} [y/N] ");
+    let _ = io::stdout().flush();
+
+    let mut answer = String::new();
+    if io::stdin().read_line(&mut answer).is_err() {
+        return false;
+    }
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+/// The entry of `paths` that best matches `query`, case-insensitively. The
+/// directory name is checked first: a name prefix beats a name substring, and
+/// within each the shorter name wins, so an exact name comes first (`shell`
+/// picks `~/code/shell` over `~/code/peregrine`). Failing that, any substring
+/// of the full path matches. Remaining ties go to the last entry: the newest
+/// bookmark or most recent dir.
+fn best_path_match<'a>(
+    paths: impl DoubleEndedIterator<Item = &'a Path>,
+    query: &str,
+) -> Option<&'a Path> {
+    ranked_path_match(paths.rev(), query, true).map(|(_, p)| p)
+}
+
+/// The [ranked_path_match] tier of a match found only in the full path, not
+/// the directory name.
+const PATH_TIER: u8 = 2;
+
+/// [best_path_match] with the winner's rank, `(tier, name length)`, lower
+/// being better. The full path is only searched when `whole_path` is set.
+/// Ties go to the first entry of `paths`.
+pub(crate) fn ranked_path_match<'a>(
+    paths: impl Iterator<Item = &'a Path>,
+    query: &str,
+    whole_path: bool,
+) -> Option<((u8, usize), &'a Path)> {
+    let needle = query.to_lowercase();
+    paths
+        .filter_map(|p| {
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            let rank = if name.starts_with(&needle) {
+                (0, name.len())
+            } else if name.contains(&needle) {
+                (1, name.len())
+            } else if whole_path && p.to_string_lossy().to_lowercase().contains(&needle) {
+                (PATH_TIER, 0)
+            } else {
+                return None;
+            };
+            Some((rank, p))
+        })
+        // `min_by_key` keeps the first of equal minimums.
+        .min_by_key(|(rank, _)| *rank)
+}
+
+/// Build a [`Command`] that won't make Windows allocate a console window for
+/// the child. Use this for any process whose output we capture (`.output()`)
+/// or that runs detached — **not** for an interactive child that needs to
+/// share the terminal, since `CREATE_NO_WINDOW` denies it a console.
+///
+/// Why it matters: the `peregrine` frontend is built `windows_subsystem =
+/// "windows"`, so it has no console of its own. When such a process spawns a
+/// console program (e.g. `git`, `pwsh`), Windows spins up a fresh `conhost.exe`
+/// for each spawn — a multi-hundred-ms stall that shows up as a per-command
+/// lag (and a flashing console window). `CREATE_NO_WINDOW` skips that entirely.
+/// On non-Windows this is just `Command::new`.
+pub fn quiet_command<S: AsRef<OsStr>>(program: S) -> Command {
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
+/// Resolve a `cd`/`cat`-style path argument against the shell's state:
+/// expands `~`/`~/...` to the home dir, treats real paths literally, and
+/// falls back to a case-insensitive substring match against bookmarked
+/// directories. Infallible — unresolvable cases degrade to the literal
+/// `cwd`-joined path rather than erroring.
+///
+/// Takes primitives instead of a `State` struct so it can be shared between
+/// the CLI shell (which stores bookmarks behind an `Arc<Mutex<_>>`) and the
+/// GUI shell (which uses a plain `Vec`). Callers are responsible for any
+/// locking before they hand us the slice.
+pub fn path_from_args(
+    home: Option<&Path>,
+    cwd: &Path,
+    bookmarks: &[PathBuf],
+    args: &str,
+) -> PathBuf {
+    if args.is_empty() || args == "~" {
+        // cd with no args (or a bare `~`) goes home; fall back to the
+        // current directory if we couldn't resolve a home dir.
+        home.map(|h| h.to_path_buf())
+            .unwrap_or_else(|| cwd.to_path_buf())
+    } else if let Some(rest) = args.strip_prefix("~/").or_else(|| args.strip_prefix("~\\")) {
+        home.map(|h| h.join(rest)).unwrap_or_else(|| cwd.join(args))
+    } else {
+        // Try the literal path first so real subdirs / absolute paths
+        // keep their normal meaning. If it isn't a directory, fall
+        // back to a substring match against bookmarked directories.
+        let literal = cwd.join(args);
+        if literal.is_dir() {
+            literal
+        } else {
+            find_bookmark(bookmarks, args).unwrap_or(literal)
+        }
+    }
+}
+
+/// Render a path as `~/relative` when it lives under the home directory;
+/// otherwise use the absolute form. Uses forward slashes after the tilde for
+/// consistency with the rest of the shell. Only `input_completion` uses this
+/// within the lib (the CLI and GUI each have their own copy), so it's
+/// crate-private rather than part of the public API.
+pub(crate) fn render_with_tilde(p: &Path, home: Option<&Path>) -> String {
+    if let Some(home) = home
+        && let Ok(rest) = p.strip_prefix(home)
+    {
+        let rest_str = rest.to_string_lossy().replace('\\', "/");
+        if rest_str.is_empty() {
+            return "~".to_string();
+        }
+        return format!("~/{}", rest_str);
+    }
+    p.display().to_string()
+}
+
+/// True when a non-folder entry is "executable" by the shell.
+///  - Linux etc: any of the user/group/other +x bits is set.
+///  - Windows: the file's extension (case-insensitive) is `.exe` or `.msi`.
+///
+/// Called from [read_browser_files] for each entry. Kept as a private
+/// helper so the cfg-split lives in one spot.
+fn is_executable_file(path: &Path, _metadata: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        _metadata.permissions().mode() & 0o111 != 0
+    }
+
+    #[cfg(not(unix))]
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .as_deref(),
+        Some("exe") | Some("msi")
+    )
+}
+
+/// Snapshot the contents of `dir` as a `Vec<BrowserFile>`. Folders are
+/// sorted first (case-insensitive alphabetical), then files (same order).
+/// Errors reading the directory or any individual entry are swallowed —
+/// callers get an empty list (or just the entries we could read).
+///
+/// Used by both the CLI and the GUI to refresh their file-browser view
+/// after `cd`-style navigation, so the directory listing stays in lockstep
+/// across both binaries.
+pub fn read_browser_files(dir: &Path) -> Vec<BrowserFile> {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut files: Vec<BrowserFile> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let disp_name = entry.file_name().to_string_lossy().into_owned();
+
+        // `file_type()` doesn't follow symlinks and is cheap on Unix; fall
+        // back to `metadata()` if it fails (rare).
+        let file_type = match entry.file_type() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let is_folder = file_type.is_dir();
+
+        let is_executable = if is_folder {
+            false
+        } else {
+            match entry.metadata() {
+                Ok(md) => is_executable_file(&path, &md),
+                Err(_) => false,
+            }
+        };
+
+        files.push(BrowserFile {
+            hidden_attr: has_hidden_attr(&entry),
+            path,
+            disp_name,
+            is_folder,
+            is_executable,
+        });
+    }
+
+    // Folders first, then files; both case-insensitive alphabetical.
+    files.sort_by(|a, b| {
+        b.is_folder
+            .cmp(&a.is_folder)
+            .then_with(|| a.disp_name.to_lowercase().cmp(&b.disp_name.to_lowercase()))
+    });
+    files
+}
+
+/// Whether `entry` has the Windows Hidden attribute (e.g. `AppData`). Always
+/// `false` on other platforms, which have no such attribute.
+pub(crate) fn has_hidden_attr(entry: &fs::DirEntry) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+        entry
+            .metadata()
+            .is_ok_and(|m| m.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = entry;
+        false
+    }
+}
+
+pub fn get_home() -> Option<PathBuf> {
+    // Resolve the home directory once; used for bare `cd` and for
+    // expanding a leading `~` / `~/...` in the argument.
+    env::var_os("USERPROFILE")
+        .or_else(|| env::var_os("HOME"))
+        .map(PathBuf::from)
+}

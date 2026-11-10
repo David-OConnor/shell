@@ -1,0 +1,1270 @@
+//! For executing commands, e.g. launching applications etc. Generally thin wrappers
+//! over `process::Command`. In addition to wrapping commands your terminal has, it provides
+//! overrides in some cases, like directory navigation, and custom commands.
+//!
+//! `sync` (git add/commit/push) and `logs` (journalctl tail) are built-ins
+//! that both the CLI (`shell`) and the GUI (Peregrine) need to run. The
+//! tricky part is that the two frontends route output differently: the CLI
+//! prints to stdout/stderr, the GUI pushes lines into its terminal pane.
+//!
+//! We bridge that by having each function take an [`OutputSink`] callback.
+//! The frontend supplies a closure that knows how to render a chunk of
+//! output, and the shared logic stays in one place.
+//!
+//! `logs` is Linux-only because `journalctl` is. On other platforms we
+//! compile a stub that just reports that via the sink.
+
+use std::{
+    env,
+    fs::{self, File},
+    io::{BufRead, BufReader},
+    path::{Path, PathBuf},
+    process::{Command, ExitStatus, Stdio},
+};
+
+use crate::{
+    DirList, RecentDir, clone_root, expand_clone, find_bookmark, find_history_index,
+    path_from_args, quiet_command, record_clone_root, remove_saved_dir, resolve_cd, resolve_root,
+    ssh, stale_dir_list,
+    state::State,
+    util::{confirm, render_with_tilde},
+};
+
+/// Which stream a chunk of output came from. Frontends use this to colour
+/// the line (stderr red, stdout default) and/or pick between stdout/stderr
+/// when printing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum OutKind {
+    Stdout,
+    Stderr,
+    /// Stderr from a child process that exited successfully: warnings and
+    /// progress chatter (e.g. git's CRLF warnings and push summary), not an
+    /// error. Printed to stderr like [OutKind::Stderr], but the GUI colours it
+    /// amber rather than red.
+    StderrOk,
+}
+
+/// The kind for a finished child's captured stderr: [OutKind::Stderr] if it
+/// failed, [OutKind::StderrOk] if it succeeded.
+pub fn stderr_kind(status: ExitStatus) -> OutKind {
+    if status.success() {
+        OutKind::StderrOk
+    } else {
+        OutKind::Stderr
+    }
+}
+
+/// Callback used by the shared built-ins to emit output. The first arg is
+/// the source stream; the second is the text (may or may not have a
+/// trailing newline — sinks should normalise).
+pub type OutputSink<'a> = &'a mut dyn FnMut(OutKind, String);
+
+/// Implements `sync <message>`: runs `git add .`, `git commit -am <message>`,
+/// `git push` in sequence under `cwd`, stopping on the first non-zero exit.
+/// All git output and any wrapper diagnostics go through `sink`.
+///
+/// Note: this captures each step's output with `.output()` rather than
+/// streaming with `.status()`, so the GUI can route lines into its pane.
+/// The CLI consequently sees output in step-sized batches rather than
+/// streaming live, which is a minor UX change vs. the previous behaviour.
+pub fn sync(message: &str, cwd: &Path, sink: OutputSink) {
+    let message = message.trim().trim_matches('"');
+    if message.is_empty() {
+        sink(
+            OutKind::Stderr,
+            "sync: commit message required, e.g. sync \"my commit message\"".to_string(),
+        );
+        return;
+    }
+
+    let steps: [&[&str]; 3] = [&["add", "."], &["commit", "-am", message], &["push"]];
+    for step in steps {
+        match quiet_command("git").args(step).current_dir(cwd).output() {
+            Ok(out) => {
+                if !out.stdout.is_empty() {
+                    sink(
+                        OutKind::Stdout,
+                        String::from_utf8_lossy(&out.stdout).into_owned(),
+                    );
+                }
+                if !out.stderr.is_empty() {
+                    sink(
+                        stderr_kind(out.status),
+                        String::from_utf8_lossy(&out.stderr).into_owned(),
+                    );
+                }
+                if !out.status.success() {
+                    sink(
+                        OutKind::Stderr,
+                        format!("sync: `git {}` failed", step.join(" ")),
+                    );
+                    return;
+                }
+            }
+            Err(e) => {
+                sink(OutKind::Stderr, format!("sync: failed to run git: {e}"));
+                return;
+            }
+        }
+    }
+}
+
+/// Used for our `log` command: wrapper around `sudo journalctl -u <service> -f
+/// With `follow = true` the child inherits stdio and tails logs live
+/// (`journalctl -f`); the sink is used only for wrapper diagnostics since
+/// stdout/stderr go straight to the terminal. The CLI uses this.
+///
+/// With `follow = false` we capture a bounded snapshot (`-n 200 --no-pager`)
+/// and emit it through `sink`. The GUI uses this — a live `-f` tail would
+/// block the UI thread indefinitely, and capturing via `.output()` only
+/// returns once the child exits.
+#[cfg(target_os = "linux")]
+pub fn logs(service: &str, follow: bool, sink: OutputSink) {
+    let service = service.trim().trim_matches('"');
+    if service.is_empty() {
+        sink(
+            OutKind::Stderr,
+            "logs: service required, e.g. logs gunicorn".to_string(),
+        );
+        return;
+    }
+
+    if follow {
+        // Stream live via the inherited tty; the user breaks out with Ctrl+C.
+        match Command::new("sudo")
+            .args(["journalctl", "-u", service, "-f"])
+            .status()
+        {
+            Ok(status) if !status.success() => {
+                sink(
+                    OutKind::Stderr,
+                    "logs: journalctl exited non-zero".to_string(),
+                );
+            }
+            Err(e) => {
+                sink(
+                    OutKind::Stderr,
+                    format!("logs: failed to run journalctl: {e}"),
+                );
+            }
+            _ => {}
+        }
+    } else {
+        // Bounded snapshot for callers (the GUI) that can't host a live tail.
+        // `--no-pager` keeps journalctl from trying to invoke `less` when
+        // stdout isn't a tty (it would otherwise either hang or error out).
+        match Command::new("sudo")
+            .args(["journalctl", "-u", service, "-n", "200", "--no-pager"])
+            .output()
+        {
+            Ok(out) => {
+                if !out.stdout.is_empty() {
+                    sink(
+                        OutKind::Stdout,
+                        String::from_utf8_lossy(&out.stdout).into_owned(),
+                    );
+                }
+                if !out.stderr.is_empty() {
+                    sink(
+                        stderr_kind(out.status),
+                        String::from_utf8_lossy(&out.stderr).into_owned(),
+                    );
+                }
+                if !out.status.success() {
+                    sink(
+                        OutKind::Stderr,
+                        "logs: journalctl exited non-zero".to_string(),
+                    );
+                }
+            }
+            Err(e) => {
+                sink(
+                    OutKind::Stderr,
+                    format!("logs: failed to run journalctl: {e}"),
+                );
+            }
+        }
+    }
+}
+
+/// `journalctl` only exists on systemd-based
+/// Linux distros, so rather than silently falling through to the system
+/// shell (where the word `journalctl` is a "command not found"), we surface
+/// a clear message.
+#[cfg(not(target_os = "linux"))]
+pub fn logs(_service: &str, _follow: bool, sink: OutputSink) {
+    sink(
+        OutKind::Stderr,
+        "logs: only supported on Linux (uses journalctl)".to_string(),
+    );
+}
+
+/// Like the Linux cat command; outputs the contents of a file to stdout.
+/// On any error (file missing, not readable, mid-stream read failure) it
+/// prints a `cat: ...` diagnostic to stderr and returns, matching the
+/// shell's other builtins. Only `run_command` (below) dispatches to this, so
+/// it stays private to the module.
+fn cat(path: &Path) {
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("cat: {}: {e}", path.display());
+            return;
+        }
+    };
+
+    for line in BufReader::new(file).lines() {
+        match line {
+            Ok(l) => println!("{l}"),
+            Err(e) => {
+                eprintln!("cat: {}: {e}", path.display());
+                return;
+            }
+        }
+    }
+}
+
+/// Implements `open`: show `dir` in the OS file browser (Explorer on Windows,
+/// the default file manager via `xdg-open` on Linux, Finder on macOS). The
+/// browser runs independently of the shell, so we don't wait for it; a
+/// background thread reaps the launcher so it doesn't linger as a zombie.
+/// Explorer exits with 1 even on success, so its status isn't checked.
+/// Launch failures go through `sink`, so the GUI can show them too.
+pub fn open_dir(dir: &Path, sink: OutputSink) {
+    let launcher = if cfg!(windows) {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+
+    match Command::new(launcher)
+        .arg(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .spawn()
+    {
+        Ok(mut child) => {
+            std::thread::spawn(move || child.wait());
+        }
+        Err(e) => sink(
+            OutKind::Stderr,
+            format!("open: failed to run {launcher}: {e}"),
+        ),
+    }
+}
+
+/// The `.gitignore` `rust new` writes, in place of the one `cargo new` does.
+const NEW_GITIGNORE: &str = "/target\nCargo.lock\n\n# IDE\n.idea\n";
+
+/// The `rustfmt.toml` `rust new` writes.
+const NEW_RUSTFMT: &str = "imports_granularity = \"Crate\"\ngroup_imports = \"StdExternalCrate\"\n";
+
+/// `cargo new` options whose value is the next argument, so [new_package_path]
+/// doesn't take the value for the path.
+const CARGO_NEW_VALUE_FLAGS: &[&str] = &[
+    "--vcs",
+    "--edition",
+    "--name",
+    "--registry",
+    "--color",
+    "--config",
+    "-Z",
+];
+
+/// Implements `rust new <path> [options]`: runs `cargo new` under `cwd`, with
+/// the options (`--lib`, `--name`, …) passed through, then replaces the package's
+/// `.gitignore` with [NEW_GITIGNORE] and adds [NEW_RUSTFMT] and a placeholder
+/// `README.md` titled with the package name. As for [sync], cargo's output is
+/// captured and goes through `sink`.
+pub fn rust(args: &str, cwd: &Path, sink: OutputSink) {
+    const USAGE: &str = "rust: usage: rust new <path> [cargo new options]";
+
+    let mut words = args.split_whitespace();
+    if words.next() != Some("new") {
+        sink(OutKind::Stderr, USAGE.to_string());
+        return;
+    }
+    let args: Vec<&str> = words.collect();
+    let Some(path) = new_package_path(&args) else {
+        sink(OutKind::Stderr, USAGE.to_string());
+        return;
+    };
+
+    match quiet_command("cargo")
+        .arg("new")
+        .args(&args)
+        .current_dir(cwd)
+        .output()
+    {
+        Ok(out) => {
+            if !out.stdout.is_empty() {
+                sink(
+                    OutKind::Stdout,
+                    String::from_utf8_lossy(&out.stdout).into_owned(),
+                );
+            }
+            if !out.stderr.is_empty() {
+                sink(
+                    stderr_kind(out.status),
+                    String::from_utf8_lossy(&out.stderr).into_owned(),
+                );
+            }
+            if !out.status.success() {
+                sink(OutKind::Stderr, "rust new: `cargo new` failed".to_string());
+                return;
+            }
+        }
+        Err(e) => {
+            sink(
+                OutKind::Stderr,
+                format!("rust new: failed to run cargo: {e}"),
+            );
+            return;
+        }
+    }
+
+    let dir = cwd.join(path);
+    // `--name` can make the package name differ from the directory's.
+    let name = package_name(&dir).unwrap_or_else(|| {
+        dir.file_name()
+            .map_or(path.to_owned(), |n| n.to_string_lossy().into_owned())
+    });
+    let files = [
+        (".gitignore", NEW_GITIGNORE.to_owned()),
+        ("rustfmt.toml", NEW_RUSTFMT.to_owned()),
+        ("README.md", format!("# {name}\n\n(placeholder)\n")),
+    ];
+    for (file, contents) in files {
+        if let Err(e) = fs::write(dir.join(file), contents) {
+            sink(
+                OutKind::Stderr,
+                format!("rust new: failed to write {file}: {e}"),
+            );
+            return;
+        }
+    }
+    sink(
+        OutKind::Stdout,
+        "Added .gitignore, rustfmt.toml and README.md".to_string(),
+    );
+}
+
+/// The path in `cargo new`'s arguments: the first that's neither an option nor
+/// an option's value.
+fn new_package_path<'a>(args: &[&'a str]) -> Option<&'a str> {
+    let mut args = args.iter();
+    while let Some(&arg) = args.next() {
+        if CARGO_NEW_VALUE_FLAGS.contains(&arg) {
+            args.next();
+        } else if !arg.starts_with('-') {
+            return Some(arg);
+        }
+    }
+    None
+}
+
+/// The package name in `dir`'s `Cargo.toml`: its first `name = "…"` line,
+/// which is the `[package]` one in what `cargo new` writes.
+fn package_name(dir: &Path) -> Option<String> {
+    let manifest = fs::read_to_string(dir.join("Cargo.toml")).ok()?;
+    manifest.lines().find_map(|line| {
+        let value = line.strip_prefix("name")?.trim_start().strip_prefix('=')?;
+        Some(value.trim().trim_matches('"').to_owned())
+    })
+}
+
+/// Bare commands that are shorthand for the `git` subcommand of the same name,
+/// e.g. `pull` runs `git pull`.
+pub const GIT_ALIASES: &[&str] = &[
+    "pull", "push", "branch", "commit", "checkout", "switch", "clone", "stash",
+];
+
+/// Bare commands that are shorthand for a `cargo` command line, e.g. `run`
+/// runs `cargo run`.
+pub const CARGO_ALIASES: &[(&str, &str)] = &[
+    ("run", "cargo run"),
+    ("build", "cargo build"),
+    ("fmt", "cargo +nightly fmt"),
+];
+
+/// If `cmd` is one of [GIT_ALIASES] or [CARGO_ALIASES], the full command line
+/// it stands for, with `args` passed through. For cargo aliases, a leading
+/// bare `release` argument becomes `--release`, so `run release` runs
+/// `cargo run --release`.
+pub fn expand_alias(cmd: &str, args: &str) -> Option<String> {
+    let (prefix, args) = if GIT_ALIASES.contains(&cmd) {
+        (format!("git {cmd}"), args.to_owned())
+    } else if let Some((_, full)) = CARGO_ALIASES.iter().find(|(a, _)| *a == cmd) {
+        let args = match args.strip_prefix("release") {
+            Some(rest) if rest.is_empty() || rest.starts_with(char::is_whitespace) => {
+                format!("--release{rest}")
+            }
+            _ => args.to_owned(),
+        };
+        (full.to_string(), args)
+    } else {
+        return None;
+    };
+    Some(if args.is_empty() {
+        prefix
+    } else {
+        format!("{prefix} {args}")
+    })
+}
+
+/// A typed command line after the shared shorthand rewrites; see [expand_input].
+pub struct Expanded {
+    /// The command line to actually run.
+    pub line: String,
+    /// True when `line` should be echoed (`> {line}`) before running, because
+    /// it isn't recognisably what was typed: a bare-name clone's full URL.
+    pub echo: bool,
+}
+
+/// Apply every text-level rewrite the shell does to a typed command line
+/// before running it, in order:
+/// - git/cargo shorthands ([expand_alias]): `pull` -> `git pull`, `run` -> `cargo run`
+/// - `git clone <name>` -> `git clone <clone_root>/<name>` ([expand_clone])
+/// - `python`/`pip` -> the cwd's virtualenv copy, when it has one
+///
+/// Both frontends call this, so a new shorthand added here works in the CLI
+/// and the GUI alike. `local_cwd` is the working directory when the command
+/// runs locally, or `None` over SSH: the remote has no local dir to check for
+/// a same-named repo, and no local venv applies there.
+pub fn expand_input(input: &str, clone_root: Option<&str>, local_cwd: Option<&Path>) -> Expanded {
+    let input = input.trim();
+    let (cmd, args) = match input.find(char::is_whitespace) {
+        Some(i) => (&input[..i], input[i..].trim()),
+        None => (input, ""),
+    };
+
+    let aliased = expand_alias(cmd, args);
+    let line = aliased.as_deref().unwrap_or(input);
+
+    if let Some(root) = clone_root
+        && let Some(cloned) = expand_clone(line, root, local_cwd)
+    {
+        return Expanded {
+            line: cloned,
+            echo: true,
+        };
+    }
+
+    if let Some(cwd) = local_cwd {
+        let venv_exe = match cmd {
+            "python" | "python3" => crate::python::venv_python(cwd),
+            "pip" | "pip3" => crate::python::venv_pip(cwd),
+            _ => None,
+        };
+        if let Some(exe) = venv_exe {
+            return Expanded {
+                line: rewrite_venv_command(&exe, args),
+                echo: false,
+            };
+        }
+    }
+
+    Expanded {
+        line: line.to_owned(),
+        echo: false,
+    }
+}
+
+/// Runs one command line. Returns false if the shell should exit.
+pub fn run_command(state: &mut State, state_path: &Path, input: &str) -> bool {
+    let input = input.trim();
+    if input.is_empty() {
+        return true;
+    }
+
+    // Split into command + remainder for built-in dispatch.
+    let (cmd, args) = match input.find(char::is_whitespace) {
+        Some(i) => (&input[..i], input[i..].trim()),
+        None => (input, ""),
+    };
+
+    // Handle history recall before recording the meta-invocation so the
+    // recursive call records only the command being re-run.
+    if cmd == "his" || cmd == "hist" || cmd == "this" {
+        let in_dir = cmd == "this";
+        let cwd = in_dir.then_some(state.cwd.as_path());
+        if args.is_empty() {
+            if let Ok(h) = state.history.lock() {
+                let rendered = if in_dir {
+                    crate::render_history_in_dir(&h, &state.cwd, 0)
+                } else {
+                    crate::render_history(&h, 0)
+                };
+                print!("{rendered}");
+            }
+            return true;
+        }
+        // `his/this p<N>` jumps straight to a page of the history list (1-based,
+        // matching the header's `Page N/M`) instead of running an item.
+        if let Some(page) = args.strip_prefix('p').and_then(|n| n.parse::<usize>().ok()) {
+            if let Ok(h) = state.history.lock() {
+                let rendered = if in_dir {
+                    crate::render_history_in_dir(&h, &state.cwd, page.saturating_sub(1))
+                } else {
+                    crate::render_history(&h, page.saturating_sub(1))
+                };
+                print!("{rendered}");
+            }
+            return true;
+        }
+        let resolved = state.history.lock().ok().and_then(|h| {
+            find_history_index(&h, cwd, args)
+                .and_then(|idx| h.get(idx).map(|item| item.text.clone()))
+        });
+        match resolved {
+            Some(text) => {
+                println!("> {text}");
+                return run_command(state, state_path, &text);
+            }
+            None => eprintln!("{cmd}: no matching history item for `{args}`"),
+        }
+        return true;
+    }
+
+    // `hisd <n>` re-runs a previous history item in its original working
+    // directory, without changing the shell's CWD. Bypasses the built-in
+    // dispatcher and shells the command out directly, since the point is to
+    // run it elsewhere on the filesystem.
+    if cmd == "hisd" {
+        match args.parse::<usize>() {
+            Ok(idx) => {
+                let resolved = state
+                    .history
+                    .lock()
+                    .ok()
+                    .and_then(|h| h.get(idx).map(|item| (item.text.clone(), item.dir.clone())));
+
+                match resolved {
+                    Some((text, dir)) => {
+                        println!("> {text}  (in {})", dir.display());
+                        // Expand shorthands (`run`, `pull`, …) so they work
+                        // here too; the system shell has never heard of them.
+                        let root = state
+                            .clone_roots
+                            .lock()
+                            .ok()
+                            .and_then(|r| r.last().cloned());
+                        let text = expand_input(&text, root.as_deref(), Some(&dir)).line;
+                        let result = if cfg!(windows) {
+                            Command::new("pwsh")
+                                .args(["-NoProfile", "-NoLogo", "-Command", &text])
+                                .current_dir(&dir)
+                                .status()
+                        } else {
+                            Command::new("sh")
+                                .args(["-c", text.as_str()])
+                                .current_dir(&dir)
+                                .status()
+                        };
+                        if let Err(e) = result {
+                            eprintln!("shell: {e}");
+                        }
+                    }
+                    None => eprintln!("hisd: no history item at index {idx}"),
+                }
+            }
+            Err(_) => eprintln!("hisd: usage: hisd <number>"),
+        }
+        return true;
+    }
+
+    if let Ok(mut hist) = state.history.lock() {
+        crate::record_history(&mut hist, input, &state.cwd);
+    }
+
+    // Track directories we've run real commands from (everything except `cd`),
+    // so Ctrl+2 / `cd <number>` can jump back to them. We always save below
+    // regardless, to flush the new history entry to disk.
+    if !matches!(cmd, "cd" | "root") {
+        let cwd = state.cwd.clone();
+        crate::record_recent_dir(&state.recent_dirs, &cwd);
+    }
+
+    if let Err(e) = state.save(state_path) {
+        eprintln!("warning: failed to save state: {e}");
+    }
+
+    // Expand shorthands (`pull` -> `git pull`, `run` -> `cargo run`, bare-name
+    // clones, venv python/pip) after recording history, so history keeps what
+    // the user typed. Done before the SSH branch so the remote, which has
+    // never heard of `pull`, receives the full command.
+    let local_cwd = state.active_remote.is_none().then_some(state.cwd.as_path());
+    let newest_root = state
+        .clone_roots
+        .lock()
+        .ok()
+        .and_then(|r| r.last().cloned());
+    let expanded = expand_input(input, newest_root.as_deref(), local_cwd);
+    if expanded.echo {
+        println!("> {}", expanded.line);
+    }
+    let input = expanded.line.as_str();
+
+    // While an SSH session is live, typed commands run in the remote shell,
+    // which keeps its state (cwd, env) between them, and gets the terminal
+    // while they run. Only the session-management keywords are intercepted
+    // here; everything else (including `cd`, `exit`) goes to the remote.
+    if state.active_remote.is_some() {
+        let mut sink = |kind, msg: String| {
+            let msg = msg.trim_end_matches('\n');
+            match kind {
+                OutKind::Stdout => println!("{msg}"),
+                OutKind::Stderr | OutKind::StderrOk => eprintln!("{msg}"),
+            }
+        };
+
+        // Resolve what to actually run on the remote. Session-management
+        // keywords are handled here and short-circuit. The shell's Rust
+        // built-ins (`logs`, `sync`) are translated to their equivalent remote
+        // command — the remote shell has never heard of them and would just
+        // answer "command not found". Everything else is sent verbatim.
+        let remote_cmd: Option<String> = match cmd {
+            "disconnect" | "quit" => {
+                if let Some(session) = state.active_remote.take() {
+                    session.disconnect();
+                }
+                println!("ssh: disconnected");
+                return true;
+            }
+            // Our own help, not the remote's — answer locally.
+            "shelp" => {
+                print!("{}", shelp_text(Frontend::Cli));
+                return true;
+            }
+            "--version" | "-v" => {
+                println!("{}", version_line());
+                return true;
+            }
+            "logs" => match ssh::remote_logs_command(args, true, &mut sink) {
+                Some(cmd) => Some(cmd),
+                None => return true,
+            },
+            "sync" => match ssh::remote_sync_command(args, &mut sink) {
+                Some(cmd) => Some(cmd),
+                None => return true,
+            },
+            // Deletes local folders; there's no remote command to translate it to.
+            "rm_targets" => {
+                eprintln!("rm_targets: only runs locally; disconnect first");
+                return true;
+            }
+            // Opens a local window; there's no remote equivalent.
+            "open" => {
+                eprintln!("open: only runs locally; disconnect first");
+                return true;
+            }
+            // Finds the project on the local disk.
+            "root" => {
+                eprintln!("root: only runs locally; disconnect first");
+                return true;
+            }
+            // Writes the new package's files on the local disk.
+            "rust" => {
+                eprintln!("rust: only runs locally; disconnect first");
+                return true;
+            }
+            _ => Some(input.to_string()),
+        };
+
+        if let Some(command) = remote_cmd {
+            ssh::run_remote(state, &command);
+        }
+        return true;
+    }
+
+    match cmd {
+        "exit" | "quit" => return false,
+
+        "shelp" => print!("{}", shelp_text(Frontend::Cli)),
+
+        "--version" | "-v" => println!("{}", version_line()),
+
+        "ssh" => ssh::cmd_ssh(state, state_path, args),
+
+        "remote" => ssh::cmd_remote(state, state_path, args),
+
+        "sync" => {
+            // Delegate to the shared implementation; route its sink output
+            // to stdout/stderr. Trim trailing newlines so we don't double up
+            // on the ones println! adds — git output already ends with `\n`.
+            let cwd = state.cwd.clone();
+            let mut sink = |kind, msg: String| {
+                let msg = msg.trim_end_matches('\n');
+                match kind {
+                    OutKind::Stdout => println!("{msg}"),
+                    OutKind::Stderr | OutKind::StderrOk => eprintln!("{msg}"),
+                }
+            };
+            sync(args, &cwd, &mut sink);
+        }
+
+        "logs" => {
+            // CLI uses `follow = true` so the user gets a live tail via
+            // inherited stdio; Ctrl+C exits journalctl and returns control
+            // to the shell. On non-Linux this is a no-op error via the sink.
+            let mut sink = |kind, msg: String| {
+                let msg = msg.trim_end_matches('\n');
+                match kind {
+                    OutKind::Stdout => println!("{msg}"),
+                    OutKind::Stderr | OutKind::StderrOk => eprintln!("{msg}"),
+                }
+            };
+            logs(args, true, &mut sink);
+        }
+
+        "rust" => {
+            let cwd = state.cwd.clone();
+            let mut sink = |kind, msg: String| {
+                let msg = msg.trim_end_matches('\n');
+                match kind {
+                    OutKind::Stdout => println!("{msg}"),
+                    OutKind::Stderr | OutKind::StderrOk => eprintln!("{msg}"),
+                }
+            };
+            rust(args, &cwd, &mut sink);
+        }
+
+        "rm_targets" => crate::cargo_targets::rm_targets(&state.cwd),
+
+        "open" => open_dir(&state.cwd, &mut |_, msg| eprintln!("{msg}")),
+
+        // On linux, this is likely the same as the system `cat` command, but it works on Windows.
+        // Another approach may be to only apply this branch on Windows.
+        "cat" => {
+            let bookmarks = state.dir_bookmarks.lock();
+            let slice: &[PathBuf] = bookmarks.as_deref().map(|v| v.as_slice()).unwrap_or(&[]);
+            let target = path_from_args(state.home.as_deref(), &state.cwd, slice, args);
+            drop(bookmarks);
+            cat(&target);
+        }
+
+        "del" => {
+            // Delete a bookmark by its displayed index
+            // (the numbers shown by the Ctrl+1 bookmark list).
+            let (sub, rest) = match args.find(char::is_whitespace) {
+                Some(i) => (&args[..i], args[i..].trim()),
+                None => (args, ""),
+            };
+
+            match sub {
+                "bm" => match rest.parse::<usize>() {
+                    Ok(idx) => {
+                        let mut removed = None;
+                        match state.dir_bookmarks.lock() {
+                            Ok(mut list) => {
+                                if idx < list.len() {
+                                    removed = Some(list.remove(idx));
+                                } else {
+                                    eprintln!(
+                                        "del bm: no bookmark at index {idx} (have {})",
+                                        list.len()
+                                    );
+                                }
+                            }
+                            Err(_) => eprintln!("del bm: bookmark list lock poisoned"),
+                        }
+                        if let Some(path) = removed {
+                            println!("Deleted bookmark: {}", path.display());
+                            if let Err(e) = state.save(state_path) {
+                                eprintln!("del bm: failed to save bookmarks: {e}");
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        eprintln!("del bm: expected a number, e.g. `del bm 4`");
+                    }
+                },
+                "" => eprintln!("del: usage: del bm <number>"),
+                other => eprintln!("del: unknown target `{other}` (expected `bm`)"),
+            }
+        }
+
+        "cd" => {
+            // `cd <number>` (with nothing else after) jumps to a recent
+            // directory by its Ctrl+2 index. Anything else is resolved as a
+            // normal path/bookmark argument.
+            let target = if let Ok(idx) = args.parse::<usize>() {
+                let resolved = state
+                    .recent_dirs
+                    .lock()
+                    .ok()
+                    .and_then(|list| list.get(idx).map(|r| r.path.clone()));
+                if resolved.is_none() {
+                    eprintln!("cd: no recent directory at index {idx}");
+                }
+                resolved
+            } else {
+                let bookmarks = state.dir_bookmarks.lock();
+                let recent = state.recent_dirs.lock();
+                let bookmark_slice: &[PathBuf] =
+                    bookmarks.as_deref().map(|v| v.as_slice()).unwrap_or(&[]);
+                let recent_slice: &[RecentDir] =
+                    recent.as_deref().map(|v| v.as_slice()).unwrap_or(&[]);
+                let resolved = resolve_cd(
+                    state.home.as_deref(),
+                    &state.cwd,
+                    bookmark_slice,
+                    recent_slice,
+                    args,
+                );
+                drop(bookmarks);
+                drop(recent);
+                resolved.map_err(|e| eprintln!("cd: {e}")).ok()
+            };
+
+            if let Some(target) = target {
+                match env::set_current_dir(&target) {
+                    Ok(_) => state.cwd = env::current_dir().unwrap_or(target),
+                    Err(e) => {
+                        eprintln!("cd: {e}");
+                        offer_stale_dir_removal(state, state_path, &target, DirList::RecentDirs);
+                    }
+                }
+            }
+        }
+
+        // `bm <number>`: jump to the bookmark at that Ctrl+1 index. Mirrors
+        // `cd <number>` but indexes into the bookmark list instead of
+        // recent_dirs.
+        "bm" => {
+            let resolved = state.dir_bookmarks.lock().ok().and_then(|list| {
+                if let Ok(idx) = args.parse::<usize>() {
+                    list.get(idx).cloned()
+                } else if !args.is_empty() {
+                    find_bookmark(&list, args)
+                } else {
+                    None
+                }
+            });
+            match resolved {
+                Some(target) => match env::set_current_dir(&target) {
+                    Ok(_) => state.cwd = env::current_dir().unwrap_or(target),
+                    Err(e) => {
+                        eprintln!("bm: {e}");
+                        offer_stale_dir_removal(state, state_path, &target, DirList::Bookmarks);
+                    }
+                },
+                None => eprintln!("bm: no matching bookmark for `{args}`"),
+            }
+        }
+
+        // The GUI's Project root button.
+        "root" => match resolve_root(&state.cwd) {
+            Ok(root) => match env::set_current_dir(&root) {
+                Ok(_) => state.cwd = env::current_dir().unwrap_or(root),
+                Err(e) => eprintln!("root: {e}"),
+            },
+            Err(e) => eprintln!("root: {e}"),
+        },
+
+        // Everything else: Pass through to the system shell (e.g. the one which we launched this
+        // application from). Shorthands, including venv `python`/`pip`, were
+        // already rewritten by [expand_input] above.
+        _ => {
+            // A successful clone from a full URL saves the URL's root, so later
+            // clones from the same place need only the repo name. Only on
+            // success, so a mistyped URL isn't saved.
+            if run_passthrough(input)
+                && let Some(root) = clone_root(input)
+            {
+                record_clone_root(&state.clone_roots, &root);
+                if let Err(e) = state.save(state_path) {
+                    eprintln!("warning: failed to save state: {e}");
+                }
+            }
+        }
+    }
+
+    true
+}
+
+/// After a `cd` to `target` failed: if it no longer exists and is saved in
+/// recent dirs or bookmarks, ask on stdin whether to remove it from that
+/// list. `from` is the list it was picked from. The GUI asks the same
+/// question with a popup.
+fn offer_stale_dir_removal(state: &mut State, state_path: &Path, target: &Path, from: DirList) {
+    let list = match (state.dir_bookmarks.lock(), state.recent_dirs.lock()) {
+        (Ok(bookmarks), Ok(recent)) => stale_dir_list(target, from, &bookmarks, &recent),
+        _ => None,
+    };
+    let Some(list) = list else {
+        return;
+    };
+
+    let shown = render_with_tilde(target, state.home.as_deref());
+    if !confirm(&format!(
+        "{shown} doesn't exist. Remove it from {}?",
+        list.name()
+    )) {
+        return;
+    }
+
+    let removed = match (state.dir_bookmarks.lock(), state.recent_dirs.lock()) {
+        (Ok(mut bookmarks), Ok(mut recent)) => {
+            remove_saved_dir(list, target, &mut bookmarks, &mut recent)
+        }
+        _ => false,
+    };
+    if removed {
+        println!("Removed {shown} from {}", list.name());
+        if let Err(e) = state.save(state_path) {
+            eprintln!("warning: failed to save state: {e}");
+        }
+    }
+}
+
+/// Keep Ctrl+C aimed at launched child processes, not the shell itself.
+///
+/// The passthrough commands below run children with inherited stdio, and the
+/// terminal delivers the interrupt keystroke to *every* process attached to
+/// it: on Windows the console broadcasts CTRL_C_EVENT to all attached
+/// processes, and on Unix SIGINT goes to the whole foreground process group.
+/// Without a handler of our own, the default action terminates the shell
+/// along with the child, dropping the user out to their outer terminal.
+///
+/// Call once at startup. Rustyline is unaffected: during `readline()` it puts
+/// the terminal in raw mode (`ENABLE_PROCESSED_INPUT` off / `ISIG` off), so
+/// Ctrl+C there arrives as an ordinary key event and still cancels the input
+/// line rather than going through these process-level handlers.
+#[cfg(windows)]
+pub fn install_ctrl_c_shield() {
+    use windows_sys::Win32::System::Console::{
+        CTRL_BREAK_EVENT, CTRL_C_EVENT, SetConsoleCtrlHandler,
+    };
+
+    // Returning TRUE marks the event handled, so the system's default handler
+    // (ExitProcess) never runs for Ctrl+C / Ctrl+Break. Other events (console
+    // close, logoff, shutdown) fall through to the default via FALSE, so
+    // closing the terminal window still terminates the shell. Handler lists
+    // are per-process — children are unaffected and die from Ctrl+C normally.
+    unsafe extern "system" fn handler(event: u32) -> windows_sys::core::BOOL {
+        matches!(event, CTRL_C_EVENT | CTRL_BREAK_EVENT).into()
+    }
+    unsafe {
+        SetConsoleCtrlHandler(Some(handler), 1);
+    }
+}
+
+/// See the Windows variant above for the full story. A no-op *handler
+/// function* rather than `SIG_IGN`, because an ignored disposition survives
+/// `execve` — `SIG_IGN` would leave children ignoring Ctrl+C too, whereas a
+/// caught handler resets to the default action in the child automatically.
+/// `libc::signal` (as opposed to raw sigaction) gives BSD semantics on every
+/// libc we run on, i.e. SA_RESTART, so the shell's blocking `wait()`/reads
+/// aren't interrupted with EINTR when the keystroke lands.
+#[cfg(unix)]
+pub fn install_ctrl_c_shield() {
+    unsafe extern "C" fn noop(_sig: libc::c_int) {}
+    let handler: unsafe extern "C" fn(libc::c_int) = noop;
+    unsafe {
+        libc::signal(libc::SIGINT, handler as libc::sighandler_t);
+        // Ctrl+\ — would otherwise kill the shell with a core dump; bash
+        // ignores it at the interactive prompt for the same reason.
+        libc::signal(libc::SIGQUIT, handler as libc::sighandler_t);
+    }
+}
+
+/// Run a command line through the system shell (PowerShell 7+ on Windows, `sh`
+/// elsewhere), inheriting stdio so interactive programs work. Used for the
+/// catch-all passthrough and the venv-rewritten `python` invocation. Returns
+/// whether the command ran and exited successfully.
+///
+/// `-NoProfile`/`-NoLogo` skip loading the user's `$PROFILE` and the startup
+/// banner, which together dominate pwsh's cold-start time. Each command spawns a
+/// fresh process, so this shaves ~200ms off every passthrough command.
+fn run_passthrough(line: &str) -> bool {
+    let result = if cfg!(windows) {
+        Command::new("pwsh")
+            .args(["-NoProfile", "-NoLogo", "-Command", line])
+            .status()
+    } else {
+        Command::new("sh").args(["-c", line]).status()
+    };
+
+    match result {
+        Ok(status) => status.success(),
+        Err(e) => {
+            eprintln!("shell: {e}");
+            false
+        }
+    }
+}
+
+/// Rewrite a `python`/`pip` invocation to run a specific venv `exe` executable,
+/// keeping the user's original arguments. The path is single-quoted so spaces
+/// in it survive the system shell; on Windows the pwsh call operator `&` is
+/// required to launch a quoted executable path.
+fn rewrite_venv_command(exe: &Path, args: &str) -> String {
+    let exe = exe.display();
+    let args = args.trim();
+    let lead = if cfg!(windows) { "& " } else { "" };
+
+    if args.is_empty() {
+        format!("{lead}'{exe}'")
+    } else {
+        format!("{lead}'{exe}' {args}")
+    }
+}
+
+/// Which frontend is asking for the [shelp_text] listing. The two shells
+/// differ in a handful of places — the GUI has always-visible panels instead
+/// of the CLI's list keystrokes, and its window can't be closed by typing
+/// `exit` — so each gets its own rows for those.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Frontend {
+    Cli,
+    Gui,
+}
+
+/// Append `rows` as `  - <invocation>   <description>` lines, with the
+/// invocation column padded so the descriptions line up.
+fn push_help_rows(out: &mut String, rows: &[(&str, &str)]) {
+    let width = rows.iter().map(|(name, _)| name.len()).max().unwrap_or(0);
+    for (name, desc) in rows {
+        out.push_str(&format!("  - {name:width$}   {desc}\n"));
+    }
+}
+
+/// The `Shell version x.y.z` line shown by `--version` / `-v` and at the top
+/// of [shelp_text]. The number comes from `Cargo.toml`.
+pub fn version_line() -> String {
+    format!("Shell version {}", env!("CARGO_PKG_VERSION"))
+}
+
+/// Text for the `shelp` built-in: every command and key shortcut, one per
+/// line, indented with a dash. Lives here (rather than in either frontend) so
+/// the CLI and GUI listings can't drift apart — the CLI prints the string, the
+/// GUI pushes it into its output pane.
+pub fn shelp_text(frontend: Frontend) -> String {
+    let cli = frontend == Frontend::Cli;
+
+    let mut commands: Vec<(&str, &str)> = vec![
+        ("shelp", "Show this list of commands and key shortcuts"),
+        ("--version, -v", "Show the shell's version"),
+        (
+            "cd <path>",
+            "Change directory. Takes `~`, a real path, part of a bookmark/recent path, or the start of any name Tab would complete",
+        ),
+        ("cd <number>", "Go to a recent directory by its index"),
+        (
+            "cd <letters>",
+            "Go to a bookmark or recent path containing this text",
+        ),
+        (
+            "root",
+            "Go to the root of the Git, Cargo or Python project this directory is in",
+        ),
+        ("bm <number>", "Go to a bookmark by its index"),
+        ("bm <letters>", "Go to a bookmark containing this text"),
+        ("del bm <number>", "Delete a bookmark by its index"),
+        (
+            "cat <file>",
+            "Print a file's contents; works on Windows too",
+        ),
+        (
+            "his <number>",
+            "Re-run a command from history (`hist` also works)",
+        ),
+        (
+            "his <letters>",
+            "Re-run the newest command containing this text",
+        ),
+        (
+            "this <number>",
+            "Re-run a command entered in the current directory",
+        ),
+        (
+            "this <letters>",
+            "Re-run the newest matching command in this directory",
+        ),
+    ];
+    commands.push((
+        "his p<page>",
+        "Show a page of history; page 1 is the newest",
+    ));
+    commands.push((
+        "this p<page>",
+        "Show a page of history in the current directory",
+    ));
+    commands.extend_from_slice(&[
+        (
+            "hisd <number>",
+            "Re-run a history item in the directory it was originally run from",
+        ),
+        (
+            "sync <message>",
+            "`git add .`, then `git commit -am <message>`, then `git push`",
+        ),
+        (
+            "pull, push, branch, commit, checkout, switch, clone, stash",
+            "Shorthand for `git pull`, `git push`, etc. Arguments are passed through",
+        ),
+        (
+            "clone <name>",
+            "Clone <root>/<name>, where <root> is saved from your last clone by full URL",
+        ),
+        (
+            "run, build, fmt",
+            "Shorthand for `cargo run`, `cargo build`, `cargo +nightly fmt`. `run release` adds `--release`",
+        ),
+        (
+            "rust new <path>",
+            "`cargo new`, then a `.gitignore` that also ignores Cargo.lock and .idea, a `rustfmt.toml`, and a placeholder README. Options such as `--lib` are passed through",
+        ),
+    ]);
+    // CLI-only: it asks for confirmation on stdin, which the GUI doesn't route.
+    if cli {
+        commands.push((
+            "rm_targets",
+            "Find cargo `target` folders under this directory, and delete them after confirming",
+        ));
+    }
+    commands.extend_from_slice(&[
+        (
+            "open",
+            "Open the current directory in the OS file browser",
+        ),
+        (
+            "logs <service>",
+            "Show a systemd service's journalctl logs. Linux only",
+        ),
+        (
+            "ssh [user@]host [port]",
+            "Log in to a host and run commands there, as with `ssh`, until `exit`. Uses your SSH keys, else a saved or typed password. `ssh <number>` connects to a saved remote",
+        ),
+        ("remote list", "List saved remotes with their indices"),
+        if cli {
+            (
+                "remote add [user@]host[:port]",
+                "Save a remote, prompting for a password to keep in the OS keyring",
+            )
+        } else {
+            (
+                "remote add [user@]host[:port]",
+                "Open the Remote panel's form, filled in, to enter a password and save",
+            )
+        },
+        (
+            "remote del <number>",
+            "Forget a saved remote, and its stored password",
+        ),
+        (
+            "disconnect",
+            "While connected to a remote, close the connection",
+        ),
+    ]);
+    commands.push(if cli {
+        (
+            "exit, quit",
+            "Exit the shell. While connected to a remote, `exit` logs out of it, and `quit` disconnects",
+        )
+    } else {
+        (
+            "exit, quit",
+            "While connected to a remote, `exit` logs out of it, and `quit` disconnects. Otherwise, close the window",
+        )
+    });
+    commands.extend_from_slice(&[
+        (
+            "python, pip",
+            "Run the current directory's virtualenv copy, when it has one",
+        ),
+        (
+            "(anything else)",
+            "Passed through to the system shell: PowerShell 7 on Windows, `sh` elsewhere",
+        ),
+    ]);
+
+    let mut keys: Vec<(&str, &str)> = if cli {
+        vec![
+            ("Enter", "Run the input"),
+            (
+                "Tab",
+                "Autocomplete at the cursor: bookmarks, directories, and dirs under bookmarks after `cd`; repo URLs after `clone`; filenames otherwise. Tab again lists the choices",
+            ),
+            (
+                "Up / Down",
+                "Walk command history. With text already typed, only entries starting with it",
+            ),
+            (
+                "Left / Right",
+                "Walk recent directories, loading `cd <path>` into the input",
+            ),
+            (
+                "Right / End / Ctrl + E",
+                "Accept the greyed suggestion at the end of the line: the rest of a past command, or Tab's only completion (`→ path` when it rewrites the word)",
+            ),
+            ("Ctrl + B", "Bookmark the current directory"),
+            ("Ctrl + 1", "List bookmarks"),
+            ("Ctrl + 2", "List recent directories"),
+            ("Ctrl + 3", "List command history"),
+            ("Ctrl + 4", "List history in the current directory"),
+            ("Ctrl + 5", "List saved SSH remotes"),
+            (
+                "Enter, ~ .",
+                "While a remote command runs: disconnect, when the connection stops responding",
+            ),
+            ("Ctrl + C", "Cancel the current input"),
+            ("Ctrl + D", "Exit"),
+        ]
+    } else {
+        vec![
+            ("Enter", "Run the input"),
+            (
+                "Tab",
+                "Autocomplete at the cursor: bookmarks, directories, and dirs under bookmarks after `cd`; repo URLs after `clone`; filenames otherwise. Tab again lists the choices",
+            ),
+            ("Up / Down", "Walk command history"),
+            (
+                "Left / Right",
+                "Walk recent directories, while the input is empty",
+            ),
+            (
+                "Right / End / Ctrl + E",
+                "Accept the greyed suggestion at the end of the line: the rest of a past command, or Tab's only completion (`→ path` when it rewrites the word)",
+            ),
+            (
+                "Ctrl + B",
+                "Bookmark the current directory, or remove its bookmark. Works anywhere in the window",
+            ),
+        ]
+    };
+
+    // See [crate::folder_key_dirs]. After Ctrl + B.
+    let folders = if cfg!(windows) {
+        "Go to AppData / Program Files"
+    } else if cfg!(target_os = "macos") {
+        "Go to ~/Library / /Applications"
+    } else {
+        "Go to ~/.local / /usr"
+    };
+    let folder_keys = [
+        ("Alt + `", "Go to the home directory"),
+        ("Alt + 1 / 2", "Go to Desktop / Downloads"),
+        ("Alt + 3 / 4", folders),
+    ];
+    let at = keys
+        .iter()
+        .position(|(k, _)| *k == "Ctrl + B")
+        .map_or(keys.len(), |i| i + 1);
+    keys.splice(at..at, folder_keys);
+
+    let mut out = format!("\n{}\n\nCommands:\n", version_line());
+    push_help_rows(&mut out, &commands);
+    out.push_str("\nKey shortcuts:\n");
+    push_help_rows(&mut out, &keys);
+    if cli {
+        out.push_str(
+            "\nPress a list's keystroke again to page back through older entries.\n\
+             Ctrl + 1-5 are available in the Windows terminal.\n",
+        );
+    }
+    out
+}
