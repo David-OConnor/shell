@@ -23,8 +23,8 @@ use rustyline::{
     validate::Validator,
 };
 use shell::{
-    ClipboardEntry, CompletionSources, DISP_PAGE_LEN, HintCache, NavState, OpenTabs,
-    RemoteTerminal, commands, complete_input, page_count, save_data,
+    CompletionSources, DISP_PAGE_LEN, HintCache, NavState, RemoteTerminal, commands,
+    complete_input, page_count, save_data,
     state::{HistoryItem, RecentDir},
 };
 
@@ -395,22 +395,7 @@ struct BookmarkHandler {
     history: Arc<Mutex<Vec<HistoryItem>>>,
     remote_terminals: Arc<Mutex<Vec<RemoteTerminal>>>,
     clone_roots: Arc<Mutex<Vec<String>>>,
-    /// Snapshot of the GUI open-tab layout taken at handler construction.
-    /// The CLI never mutates this field, so the snapshot is always current
-    /// and we just write it back unchanged to preserve the GUI's tabs.
-    open_tabs: OpenTabs,
-    /// Snapshot of the GUI's custom bookmark order, written back unchanged
-    /// for the same reason as `open_tabs`.
-    bookmark_order: Vec<PathBuf>,
-    /// Snapshot of the GUI's clipboard history, written back unchanged for
-    /// the same reason as `open_tabs`.
-    clipboard: Vec<ClipboardEntry>,
-    /// Snapshot of the GUI's scratchpad text, written back unchanged for
-    /// the same reason as `open_tabs`.
-    scratchpad: String,
-    /// Snapshot of the GUI's cargo target roots, written back unchanged for
-    /// the same reason as `open_tabs`.
-    rust_target_roots: Vec<PathBuf>,
+    saved: Arc<Mutex<save_data::Shared>>,
     save_path: PathBuf,
     printer: SharedPrinter,
     /// Shared recall state. After adding a bookmark we stash the current input
@@ -438,28 +423,26 @@ impl ConditionalEventHandler for BookmarkHandler {
                 let msg = format!("Added a bookmark: {}\n", cwd.display());
                 list.push(cwd);
                 added = true;
-                // Lock recent_dirs, history, remote_terminals, clone_roots
-                // after bookmarks — same order as State::save, so no
+                // Lock recent_dirs, history, remote_terminals, clone_roots,
+                // saved after bookmarks — same order as State::save, so no
                 // lock-order conflicts.
-                if let Ok(recent) = self.recent_dirs.lock()
-                    && let Ok(history) = self.history.lock()
-                    && let Ok(remote_terminals) = self.remote_terminals.lock()
-                    && let Ok(clone_roots) = self.clone_roots.lock()
-                    && let Err(e) = save_data::save_state(
-                        &list,
-                        &recent,
-                        &history,
-                        &remote_terminals,
-                        &clone_roots,
-                        &self.open_tabs,
-                        &self.bookmark_order,
-                        &self.clipboard,
-                        &self.scratchpad,
-                        &self.rust_target_roots,
-                        &self.save_path,
-                    )
+                if let Ok(mut recent) = self.recent_dirs.lock()
+                    && let Ok(mut history) = self.history.lock()
+                    && let Ok(mut remote_terminals) = self.remote_terminals.lock()
+                    && let Ok(mut clone_roots) = self.clone_roots.lock()
+                    && let Ok(mut saved) = self.saved.lock()
                 {
-                    eprintln!("warning: failed to save state: {e}");
+                    let ours = save_data::Ours {
+                        bookmarks: &mut list,
+                        recent_dirs: &mut recent,
+                        history: &mut history,
+                        remote_terminals: &mut remote_terminals,
+                        clone_roots: &mut clone_roots,
+                    };
+
+                    if let Err(e) = save_data::save(&mut saved, ours, None, &self.save_path) {
+                        eprintln!("warning: failed to save state: {e}");
+                    }
                 }
                 msg
             };
@@ -754,12 +737,8 @@ fn main() {
             history: state.history.clone(),
             remote_terminals: state.remote_terminals.clone(),
             clone_roots: state.clone_roots.clone(),
+            saved: state.saved.clone(),
             nav: hist_nav.clone(),
-            open_tabs: state.open_tabs.clone(),
-            bookmark_order: state.bookmark_order.clone(),
-            clipboard: state.clipboard.clone(),
-            scratchpad: state.scratchpad.clone(),
-            rust_target_roots: state.rust_target_roots.clone(),
             save_path: state_path.clone(),
             printer: printer.clone(),
         })),

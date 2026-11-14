@@ -41,23 +41,10 @@ pub struct State {
     /// on its own `State`.) Only `refresh_browser_files` writes it, so it's
     /// private to this module.
     browser_files: Arc<Mutex<Vec<BrowserFile>>>,
-    /// GUI open-tab layout. The CLI never reads or mutates this — it's held
-    /// only so a CLI-side save round-trips the GUI's tabs back unchanged
-    /// instead of dropping them. (The GUI's settings and layout aren't in
-    /// the state file at all; it saves those itself.)
-    pub open_tabs: OpenTabs,
-    /// The order the GUI's Bookmarks panel was dragged into. Held only to
-    /// round-trip the `BM_ORDER` lines, like `open_tabs`.
-    pub bookmark_order: Vec<PathBuf>,
-    /// GUI clipboard history, newest first. Held only to round-trip the
-    /// `CLIP` lines, like `open_tabs`.
-    pub clipboard: Vec<ClipboardEntry>,
-    /// GUI scratchpad text. Held only to round-trip the `SCRATCHPAD` line,
-    /// like `open_tabs`.
-    pub scratchpad: String,
-    /// GUI System status pane's cargo target roots. Held only to round-trip
-    /// the `RUST_TARGET_ROOT` lines, like `open_tabs`.
-    pub rust_target_roots: Vec<PathBuf>,
+    /// The lists above as last read or written, so a save keeps what the GUI
+    /// or another shell saved since (see [save_data::save]). Locked after
+    /// them.
+    pub saved: Arc<Mutex<save_data::Shared>>,
     /// Cached git branch for `cwd`. `None` when cwd isn't inside a repo.
     /// Refreshed by `refresh_branch` after every command and after `cd` —
     /// branch can change behind our back via `git checkout`, so we re-check
@@ -86,11 +73,7 @@ impl Default for State {
             remote_terminals: Arc::new(Mutex::new(Vec::new())),
             clone_roots: Arc::new(Mutex::new(Vec::new())),
             browser_files: Arc::new(Mutex::new(Vec::new())),
-            open_tabs: OpenTabs::default(),
-            bookmark_order: Vec::new(),
-            clipboard: Vec::new(),
-            scratchpad: String::new(),
-            rust_target_roots: Vec::new(),
+            saved: Arc::default(),
             branch,
             active_remote: None,
         }
@@ -170,51 +153,44 @@ impl State {
     }
 
     /// Persist user-controlled state (bookmarks + recent dirs + history +
-    /// remote terminals + clone roots) to the given file. Called after every
-    /// mutation of any of them. Locks in the order bookmarks → recent_dirs →
-    /// history → remote_terminals → clone_roots — keep this order consistent
-    /// across all callers to avoid lock-order deadlocks. Only `commands::run_command` calls this
-    /// (the binary persists via `save_data::save_state` directly), so it's
-    /// crate-private.
+    /// remote terminals + clone roots) to the given file, taking in what the
+    /// GUI or another shell saved there since. Called after every mutation of
+    /// any of them. Locks in the order bookmarks → recent_dirs → history →
+    /// remote_terminals → clone_roots → saved — keep this order consistent
+    /// across all callers to avoid lock-order deadlocks. Only
+    /// `commands::run_command` calls this (the binary's Ctrl+B handler calls
+    /// `save_data::save` directly), so it's crate-private.
     pub(crate) fn save(&self, path: &Path) -> io::Result<()> {
-        let bookmarks = self
+        let poisoned = |name| io::Error::other(format!("{name} lock poisoned"));
+
+        let mut bookmarks = self
             .dir_bookmarks
             .lock()
-            .map_err(|_| io::Error::other("bookmark lock poisoned"))?;
-
-        let recent = self
+            .map_err(|_| poisoned("bookmark"))?;
+        let mut recent = self
             .recent_dirs
             .lock()
-            .map_err(|_| io::Error::other("recent-dirs lock poisoned"))?;
-
-        let history = self
-            .history
-            .lock()
-            .map_err(|_| io::Error::other("history lock poisoned"))?;
-
-        let remote_terminals = self
+            .map_err(|_| poisoned("recent-dirs"))?;
+        let mut history = self.history.lock().map_err(|_| poisoned("history"))?;
+        let mut remote_terminals = self
             .remote_terminals
             .lock()
-            .map_err(|_| io::Error::other("remote-terminals lock poisoned"))?;
-
-        let clone_roots = self
+            .map_err(|_| poisoned("remote-terminals"))?;
+        let mut clone_roots = self
             .clone_roots
             .lock()
-            .map_err(|_| io::Error::other("clone-roots lock poisoned"))?;
+            .map_err(|_| poisoned("clone-roots"))?;
+        let mut saved = self.saved.lock().map_err(|_| poisoned("saved"))?;
 
-        save_data::save_state(
-            &bookmarks,
-            &recent,
-            &history,
-            &remote_terminals,
-            &clone_roots,
-            &self.open_tabs,
-            &self.bookmark_order,
-            &self.clipboard,
-            &self.scratchpad,
-            &self.rust_target_roots,
-            path,
-        )
+        let ours = save_data::Ours {
+            bookmarks: &mut bookmarks,
+            recent_dirs: &mut recent,
+            history: &mut history,
+            remote_terminals: &mut remote_terminals,
+            clone_roots: &mut clone_roots,
+        };
+
+        save_data::save(&mut saved, ours, None, path).map(|_| ())
     }
 
     /// Restore state from disk, returning a fresh `State` with that data.
@@ -222,6 +198,7 @@ impl State {
     /// `State::new()` values (not an error).
     pub fn load(path: &Path) -> io::Result<Self> {
         let loaded = save_data::load_state(path)?;
+        let saved = loaded.shared();
         let cwd = env::current_dir().unwrap_or_default();
         let branch = current_branch(&cwd);
 
@@ -234,17 +211,14 @@ impl State {
             remote_terminals: Arc::new(Mutex::new(loaded.remote_terminals)),
             clone_roots: Arc::new(Mutex::new(loaded.clone_roots)),
             browser_files: Arc::new(Mutex::new(Vec::new())),
-            open_tabs: loaded.open_tabs,
-            bookmark_order: loaded.bookmark_order,
-            clipboard: loaded.clipboard,
-            scratchpad: loaded.scratchpad,
-            rust_target_roots: loaded.rust_target_roots,
+            saved: Arc::new(Mutex::new(saved)),
             branch,
             active_remote: None,
         })
     }
 }
 
+#[derive(Clone)]
 pub struct HistoryItem {
     pub text: String,
     pub dir: PathBuf,
@@ -254,6 +228,7 @@ pub struct HistoryItem {
 /// One entry in the recent-directories list: a path we ran a command from,
 /// plus the time we last visited it. Lives in `save_data` so the persistence
 /// format owns its row type; both the CLI and GUI binaries re-use it.
+#[derive(Clone)]
 pub struct RecentDir {
     pub path: PathBuf,
     pub dt: DateTime<Utc>,
@@ -275,6 +250,7 @@ pub struct BrowserFile {
 /// keyring (see `crate::secrets`), keyed by `username@host:port`. This struct
 /// (and the on-disk state file) only ever holds the non-secret connection
 /// details, so the plaintext password problem is gone.
+#[derive(Clone)]
 pub struct RemoteTerminal {
     pub host: String,
     pub port: u16,

@@ -23,13 +23,18 @@
 //! Timestamps are written as second-precision RFC 3339 (e.g.
 //! `2026-06-23T13:41:32Z`) to keep rows compact.
 //!
-//! Both the CLI and GUI crates call into this module with plain slices /
-//! `Vec`s — neither one re-implements the parsing or formatting. The CLI
-//! locks its `Arc<Mutex<_>>`s before calling in; the GUI passes its owned
-//! `Vec`s directly.
+//! Both the CLI and GUI crates call into this module — neither one
+//! re-implements the parsing or formatting.
+//!
+//! Several processes (CLI shells and the GUI) share the file, each holding
+//! its lists in memory. So [save] merges: it keeps what other processes saved
+//! since this one last read or wrote the file, as well as this one's changes.
+//! The CLI keeps the GUI-only fields as on disk.
 
 use std::{
+    collections::HashSet,
     fs,
+    hash::Hash,
     io::{self, BufRead, BufReader, Write},
     path::{Path, PathBuf},
 };
@@ -38,6 +43,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 
 use crate::state::{
     ClipboardContent, ClipboardEntry, HistoryItem, OpenTabs, RecentDir, RemoteTerminal,
+    dedup_history,
 };
 
 pub const FILENAME: &str = "shell_state.ss";
@@ -92,44 +98,236 @@ pub fn default_path() -> Option<PathBuf> {
         .map(|h| PathBuf::from(h).join(FILENAME))
 }
 
-/// Overwrite the state file with the given bookmark, recent-dir, history,
-/// remote-terminal, and clone-root lists. Creates parent directories as needed.
-pub fn save_state(
-    bookmarks: &[PathBuf],
-    recent_dirs: &[RecentDir],
-    history: &[HistoryItem],
-    remote_terminals: &[RemoteTerminal],
-    clone_roots: &[String],
-    open_tabs: &OpenTabs,
-    bookmark_order: &[PathBuf],
-    clipboard: &[ClipboardEntry],
-    scratchpad: &str,
-    rust_target_roots: &[PathBuf],
+impl LoadedState {
+    pub fn shared(&self) -> Shared {
+        Shared {
+            bookmarks: self.bookmarks.clone(),
+            recent_dirs: self.recent_dirs.clone(),
+            history: self.history.clone(),
+            remote_terminals: self.remote_terminals.clone(),
+            clone_roots: self.clone_roots.clone(),
+        }
+    }
+}
+
+/// The lists both the CLI and the GUI change.
+#[derive(Clone, Default)]
+pub struct Shared {
+    pub bookmarks: Vec<PathBuf>,
+    pub recent_dirs: Vec<RecentDir>,
+    pub history: Vec<HistoryItem>,
+    pub remote_terminals: Vec<RemoteTerminal>,
+    pub clone_roots: Vec<String>,
+}
+
+/// A process's own [Shared] lists, which [save] and [sync] update in place.
+pub struct Ours<'a> {
+    pub bookmarks: &'a mut Vec<PathBuf>,
+    pub recent_dirs: &'a mut Vec<RecentDir>,
+    pub history: &'a mut Vec<HistoryItem>,
+    pub remote_terminals: &'a mut Vec<RemoteTerminal>,
+    pub clone_roots: &'a mut Vec<String>,
+}
+
+impl Ours<'_> {
+    fn to_shared(&self) -> Shared {
+        Shared {
+            bookmarks: self.bookmarks.clone(),
+            recent_dirs: self.recent_dirs.clone(),
+            history: self.history.clone(),
+            remote_terminals: self.remote_terminals.clone(),
+            clone_roots: self.clone_roots.clone(),
+        }
+    }
+}
+
+/// The fields only the GUI changes.
+pub struct GuiOnly<'a> {
+    pub open_tabs: &'a OpenTabs,
+    pub bookmark_order: &'a [PathBuf],
+    pub clipboard: &'a [ClipboardEntry],
+    pub scratchpad: &'a str,
+    pub rust_target_roots: &'a [PathBuf],
+}
+
+/// Writes `ours` to the file, merged first with what other processes saved
+/// there (see [sync]). `base` is the lists as this process last read or wrote
+/// them. `gui` is `None` from the CLI, which keeps the GUI-only fields as on
+/// disk. Returns whether `ours` took changes from disk.
+pub fn save(
+    base: &mut Shared,
+    mut ours: Ours,
+    gui: Option<GuiOnly>,
     path: &Path,
-) -> io::Result<()> {
+) -> io::Result<bool> {
+    let disk = load_state(path)?;
+    let changed = merge(base, &mut ours, disk.shared());
+
+    let gui = gui.unwrap_or(GuiOnly {
+        open_tabs: &disk.open_tabs,
+        bookmark_order: &disk.bookmark_order,
+        clipboard: &disk.clipboard,
+        scratchpad: &disk.scratchpad,
+        rust_target_roots: &disk.rust_target_roots,
+    });
+    save_state(&ours, &gui, path)?;
+    *base = ours.to_shared();
+
+    Ok(changed)
+}
+
+/// Takes into `ours` what other processes saved to the file since `base`,
+/// keeping its own changes since then. `base` becomes the file's lists.
+/// Returns whether `ours` changed.
+pub fn sync(base: &mut Shared, mut ours: Ours, path: &Path) -> io::Result<bool> {
+    let disk = load_state(path)?;
+
+    Ok(merge(base, &mut ours, disk.shared()))
+}
+
+/// Three-way merges each list: `theirs`, less what `ours` removed since
+/// `base`, plus what it added. `base` becomes `theirs`.
+fn merge(base: &mut Shared, ours: &mut Ours, theirs: Shared) -> bool {
+    let bookmarks = merge_list(&base.bookmarks, ours.bookmarks, &theirs.bookmarks, |p| {
+        p.clone()
+    });
+    // Second precision, as on disk.
+    let recent_dirs = merge_list(
+        &base.recent_dirs,
+        ours.recent_dirs,
+        &theirs.recent_dirs,
+        |r| (r.path.clone(), r.dt.timestamp()),
+    );
+    let history = merge_list(&base.history, ours.history, &theirs.history, |h| {
+        (h.text.clone(), h.dir.clone(), h.dt.timestamp())
+    });
+    let remote_terminals = merge_list(
+        &base.remote_terminals,
+        ours.remote_terminals,
+        &theirs.remote_terminals,
+        |r| (r.host.clone(), r.port, r.username.clone()),
+    );
+    let clone_roots = merge_list(
+        &base.clone_roots,
+        ours.clone_roots,
+        &theirs.clone_roots,
+        |r| r.clone(),
+    );
+
+    // Both sides may have visited a dir or rerun a command: keep the latest.
+    if recent_dirs {
+        ours.recent_dirs.sort_by_key(|r| r.dt);
+        let mut seen = HashSet::new();
+        let keep: Vec<bool> = ours
+            .recent_dirs
+            .iter()
+            .rev()
+            .map(|r| seen.insert(r.path.clone()))
+            .collect();
+        let mut keep = keep.into_iter().rev();
+        ours.recent_dirs.retain(|_| keep.next().unwrap_or(true));
+    }
+
+    if history {
+        ours.history.sort_by_key(|h| h.dt);
+        dedup_history(ours.history);
+    }
+
+    *base = theirs;
+
+    bookmarks || recent_dirs || history || remote_terminals || clone_roots
+}
+
+/// [merge] for one list, its items told apart by `key`. Returns whether `ours`
+/// changed: not when `theirs` is still `base`.
+fn merge_list<T: Clone, K: Hash + Eq>(
+    base: &[T],
+    ours: &mut Vec<T>,
+    theirs: &[T],
+    key: impl Fn(&T) -> K,
+) -> bool {
+    if base.len() == theirs.len() && base.iter().zip(theirs).all(|(b, t)| key(b) == key(t)) {
+        return false;
+    }
+
+    let base_keys: HashSet<K> = base.iter().map(&key).collect();
+    let our_keys: HashSet<K> = ours.iter().map(&key).collect();
+
+    let mut merged: Vec<T> = theirs
+        .iter()
+        .filter(|t| {
+            let k = key(t);
+            our_keys.contains(&k) || !base_keys.contains(&k)
+        })
+        .cloned()
+        .collect();
+    let mut present: HashSet<K> = merged.iter().map(&key).collect();
+
+    for item in ours.iter() {
+        let k = key(item);
+        if !base_keys.contains(&k) && present.insert(k) {
+            merged.push(item.clone());
+        }
+    }
+
+    *ours = merged;
+
+    true
+}
+
+/// Overwrites the file. Written in full to a temporary file first, then
+/// moved into place, so another process never reads half of it: [merge]
+/// would take the missing half as removals.
+fn save_state(ours: &Ours, gui: &GuiOnly, path: &Path) -> io::Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
         fs::create_dir_all(parent)?;
     }
 
-    // Buffered: the GUI saves on every copy, and clipboard entries can be big.
-    let mut f = io::BufWriter::new(fs::File::create(path)?);
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".{}.tmp", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+
+    let written = fs::File::create(&tmp).and_then(|file| {
+        // Buffered: the GUI saves on every copy, and clipboard entries can be big.
+        let mut f = io::BufWriter::new(file);
+        write_state(&mut f, ours, gui)?;
+        f.flush()
+    });
+    // Replacing can fail while something else (e.g. an antivirus scan) has
+    // the file open; then write over it.
+    let result =
+        written.and_then(|()| fs::rename(&tmp, path).or_else(|_| fs::copy(&tmp, path).map(|_| ())));
+    let _ = fs::remove_file(&tmp);
+
+    result
+}
+
+fn write_state(f: &mut impl Write, ours: &Ours, gui: &GuiOnly) -> io::Result<()> {
+    let GuiOnly {
+        open_tabs,
+        bookmark_order,
+        clipboard,
+        scratchpad,
+        rust_target_roots,
+    } = gui;
+
     writeln!(
         f,
         "# Shell state — auto-generated. Do not edit while shell is running."
     )?;
 
-    for bm in bookmarks {
+    for bm in ours.bookmarks.iter() {
         writeln!(f, "{BOOKMARK_TAG}{}", bm.display())?;
     }
 
     // GUI-only: the custom order, one path per line, like BM.
-    for bm in bookmark_order {
+    for bm in bookmark_order.iter() {
         writeln!(f, "{BOOKMARK_ORDER_TAG}{}", bm.display())?;
     }
 
-    for r in recent_dirs {
+    for r in ours.recent_dirs.iter() {
         writeln!(
             f,
             "{RECENT_DIR_TAG}{} {}",
@@ -138,7 +336,7 @@ pub fn save_state(
         )?;
     }
 
-    for h in history {
+    for h in ours.history.iter() {
         // Flatten any newlines so each history entry is one line on disk.
         let text = h.text.replace(['\r', '\n'], " ").replace('\t', " ");
         writeln!(
@@ -158,7 +356,7 @@ pub fn save_state(
         writeln!(f, "{ACTIVE_TAB_TAG}{}", open_tabs.active)?;
     }
 
-    for rt in remote_terminals {
+    for rt in ours.remote_terminals.iter() {
         // Only non-secret connection details go on disk; the password lives in
         // the OS keyring (see `crate::secrets`). Format is host\tport\tusername.
         let host = sanitize_field(&rt.host);
@@ -170,12 +368,12 @@ pub fn save_state(
         )?;
     }
 
-    for root in clone_roots {
+    for root in ours.clone_roots.iter() {
         writeln!(f, "{CLONE_ROOT_TAG}{}", sanitize_field(root))?;
     }
 
     // GUI-only.
-    for root in rust_target_roots {
+    for root in rust_target_roots.iter() {
         writeln!(f, "{RUST_TARGET_ROOT_TAG}{}", root.display())?;
     }
 
@@ -187,7 +385,7 @@ pub fn save_state(
 
     // Clipboard: GUI-only, newest first. Last, since entries can be long.
     // `<dt>\ttext\t<text>` or `<dt>\tcopy|cut\t<path>\t<path>...`.
-    for entry in clipboard {
+    for entry in clipboard.iter() {
         let dt = entry.added.to_rfc3339_opts(SecondsFormat::Secs, true);
         match &entry.content {
             ClipboardContent::Text(text) => {
@@ -204,7 +402,7 @@ pub fn save_state(
         }
     }
 
-    f.flush()
+    Ok(())
 }
 
 /// Flatten characters that would break the line/tab-based record format.
