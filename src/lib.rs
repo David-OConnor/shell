@@ -13,7 +13,7 @@ pub mod ssh;
 pub mod state;
 mod util;
 
-pub use cargo_targets::{TargetDir, dir_size, find_targets};
+pub use cargo_targets::{TargetDir, delete_targets, dir_size, find_targets};
 pub use common_dirs::folder_key_dirs;
 pub use git::{BRANCH_PREFIX, clone_root, current_branch, expand_clone, truncate_branch};
 pub use input_completion::{

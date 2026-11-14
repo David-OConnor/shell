@@ -12,10 +12,10 @@
 //! Deleting directly removes exactly what the user approved.
 //!
 //! The GUI's System panel uses [find_targets] and [dir_size] to report the
-//! space these folders take.
+//! space these folders take, and [delete_targets] to delete them.
 
 use std::{
-    fs,
+    fs, io,
     path::{Path, PathBuf},
 };
 
@@ -26,6 +26,7 @@ use crate::{input_completion::is_hidden, util::confirm};
 const SKIP_DIRS: &[&str] = &["node_modules", "__pycache__", "venv", "site-packages"];
 
 /// A cargo build-output folder found by [find_targets].
+#[derive(Clone)]
 pub struct TargetDir {
     pub path: PathBuf,
     /// Total size of the files inside, in bytes.
@@ -67,26 +68,40 @@ pub fn rm_targets(cwd: &Path) {
         return;
     }
 
-    let mut freed = 0;
-    let mut failed = 0;
-    for target in &targets {
+    let failures = delete_targets(&targets, |target| {
         println!("Deleting {}", target.path.display());
-        match fs::remove_dir_all(&target.path) {
-            Ok(()) => freed += target.size,
-            Err(e) => {
-                failed += 1;
-                eprintln!("rm_targets: {}: {e}", target.path.display());
-            }
+    });
+    for (target, e) in &failures {
+        eprintln!("rm_targets: {}: {e}", target.path.display());
+    }
+
+    let kept: u64 = failures.iter().map(|(t, _)| t.size).sum();
+    println!("Freed {}.", format_gb(total - kept));
+    if !failures.is_empty() {
+        eprintln!(
+            "rm_targets: {} {} could not be fully deleted",
+            failures.len(),
+            plural(failures.len())
+        );
+    }
+}
+
+/// Deletes `targets`, going on past any that fail (e.g. a file held open by a
+/// running program). `before` runs ahead of each. Returns the failures.
+pub fn delete_targets<'a>(
+    targets: &'a [TargetDir],
+    mut before: impl FnMut(&TargetDir),
+) -> Vec<(&'a TargetDir, io::Error)> {
+    let mut failures = Vec::new();
+
+    for target in targets {
+        before(target);
+        if let Err(e) = fs::remove_dir_all(&target.path) {
+            failures.push((target, e));
         }
     }
 
-    println!("Freed {}.", format_gb(freed));
-    if failed > 0 {
-        eprintln!(
-            "rm_targets: {failed} {} could not be fully deleted",
-            plural(failed)
-        );
-    }
+    failures
 }
 
 /// Recursively search `root` for cargo target folders: a directory named
