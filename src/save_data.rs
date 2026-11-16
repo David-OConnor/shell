@@ -39,7 +39,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use jiff::Timestamp;
 
 use crate::state::{
     ClipboardContent, ClipboardEntry, HistoryItem, OpenTabs, RecentDir, RemoteTerminal,
@@ -185,6 +185,11 @@ pub fn sync(base: &mut Shared, mut ours: Ours, path: &Path) -> io::Result<bool> 
     Ok(merge(base, &mut ours, disk.shared()))
 }
 
+/// The Unix second as written to disk, including before the epoch.
+fn unix_second(dt: Timestamp) -> i64 {
+    dt.as_second() - i64::from(dt.subsec_nanosecond() < 0)
+}
+
 /// Three-way merges each list: `theirs`, less what `ours` removed since
 /// `base`, plus what it added. `base` becomes `theirs`.
 fn merge(base: &mut Shared, ours: &mut Ours, theirs: Shared) -> bool {
@@ -196,10 +201,10 @@ fn merge(base: &mut Shared, ours: &mut Ours, theirs: Shared) -> bool {
         &base.recent_dirs,
         ours.recent_dirs,
         &theirs.recent_dirs,
-        |r| (r.path.clone(), r.dt.timestamp()),
+        |r| (r.path.clone(), unix_second(r.dt)),
     );
     let history = merge_list(&base.history, ours.history, &theirs.history, |h| {
-        (h.text.clone(), h.dir.clone(), h.dt.timestamp())
+        (h.text.clone(), h.dir.clone(), unix_second(h.dt))
     });
     let remote_terminals = merge_list(
         &base.remote_terminals,
@@ -328,24 +333,13 @@ fn write_state(f: &mut impl Write, ours: &Ours, gui: &GuiOnly) -> io::Result<()>
     }
 
     for r in ours.recent_dirs.iter() {
-        writeln!(
-            f,
-            "{RECENT_DIR_TAG}{} {}",
-            r.dt.to_rfc3339_opts(SecondsFormat::Secs, true),
-            r.path.display()
-        )?;
+        writeln!(f, "{RECENT_DIR_TAG}{:.0} {}", r.dt, r.path.display())?;
     }
 
     for h in ours.history.iter() {
         // Flatten any newlines so each history entry is one line on disk.
         let text = h.text.replace(['\r', '\n'], " ").replace('\t', " ");
-        writeln!(
-            f,
-            "{HISTORY_TAG}{}\t{}\t{}",
-            h.dt.to_rfc3339_opts(SecondsFormat::Secs, true),
-            h.dir.display(),
-            text
-        )?;
+        writeln!(f, "{HISTORY_TAG}{:.0}\t{}\t{}", h.dt, h.dir.display(), text)?;
     }
 
     // GUI-only.
@@ -386,10 +380,10 @@ fn write_state(f: &mut impl Write, ours: &Ours, gui: &GuiOnly) -> io::Result<()>
     // Clipboard: GUI-only, newest first. Last, since entries can be long.
     // `<dt>\ttext\t<text>` or `<dt>\tcopy|cut\t<path>\t<path>...`.
     for entry in clipboard.iter() {
-        let dt = entry.added.to_rfc3339_opts(SecondsFormat::Secs, true);
+        let dt = entry.added;
         match &entry.content {
             ClipboardContent::Text(text) => {
-                writeln!(f, "{CLIPBOARD_TAG}{dt}\ttext\t{}", escape_field(text))?;
+                writeln!(f, "{CLIPBOARD_TAG}{dt:.0}\ttext\t{}", escape_field(text))?;
             }
             ClipboardContent::Files { paths, cut } => {
                 let kind = if *cut { "cut" } else { "copy" };
@@ -397,7 +391,7 @@ fn write_state(f: &mut impl Write, ours: &Ours, gui: &GuiOnly) -> io::Result<()>
                     .iter()
                     .map(|p| escape_field(&p.to_string_lossy()))
                     .collect();
-                writeln!(f, "{CLIPBOARD_TAG}{dt}\t{kind}\t{}", paths.join("\t"))?;
+                writeln!(f, "{CLIPBOARD_TAG}{dt:.0}\t{kind}\t{}", paths.join("\t"))?;
             }
         }
     }
@@ -507,10 +501,10 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
             if let Some(space) = rest.find(' ') {
                 let (dt_str, path_str) = rest.split_at(space);
                 let path_str = path_str.trim_start();
-                if let Ok(dt) = DateTime::parse_from_rfc3339(dt_str) {
+                if let Ok(dt) = dt_str.parse::<Timestamp>() {
                     recent_dirs.push(RecentDir {
                         path: PathBuf::from(path_str),
-                        dt: dt.with_timezone(&Utc),
+                        dt,
                     });
                 }
             }
@@ -523,12 +517,12 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
             let mut parts = rest.splitn(3, '\t');
             if let (Some(dt_str), Some(dir_str), Some(text)) =
                 (parts.next(), parts.next(), parts.next())
-                && let Ok(dt) = DateTime::parse_from_rfc3339(dt_str)
+                && let Ok(dt) = dt_str.parse::<Timestamp>()
             {
                 history.push(HistoryItem {
                     text: text.to_string(),
                     dir: PathBuf::from(dir_str),
-                    dt: dt.with_timezone(&Utc),
+                    dt,
                 });
             }
             continue;
@@ -585,7 +579,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
             // skipped.
             let mut parts = rest.trim_end_matches('\r').split('\t');
             if let (Some(dt_str), Some(kind)) = (parts.next(), parts.next())
-                && let Ok(dt) = DateTime::parse_from_rfc3339(dt_str)
+                && let Ok(dt) = dt_str.parse::<Timestamp>()
             {
                 let content = match kind {
                     "text" => parts
@@ -602,10 +596,7 @@ pub fn load_state(path: &Path) -> io::Result<LoadedState> {
                     _ => None,
                 };
                 if let Some(content) = content {
-                    clipboard.push(ClipboardEntry {
-                        content,
-                        added: dt.with_timezone(&Utc),
-                    });
+                    clipboard.push(ClipboardEntry { content, added: dt });
                 }
             }
             continue;

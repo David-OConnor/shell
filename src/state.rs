@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 
 use crate::{
     current_branch, get_home, git::branch_indicator, history_latest_indices, read_browser_files,
@@ -222,7 +222,7 @@ impl State {
 pub struct HistoryItem {
     pub text: String,
     pub dir: PathBuf,
-    pub dt: DateTime<Utc>,
+    pub dt: Timestamp,
 }
 
 /// One entry in the recent-directories list: a path we ran a command from,
@@ -231,7 +231,7 @@ pub struct HistoryItem {
 #[derive(Clone)]
 pub struct RecentDir {
     pub path: PathBuf,
-    pub dt: DateTime<Utc>,
+    pub dt: Timestamp,
 }
 
 /// todo: Determine if you want this, or can use PathBuf directly. This may have
@@ -264,7 +264,7 @@ pub struct RemoteTerminal {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClipboardEntry {
     pub content: ClipboardContent,
-    pub added: DateTime<Utc>,
+    pub added: Timestamp,
 }
 
 /// One copy operation. A group of files remains a single history entry.
@@ -501,7 +501,7 @@ pub fn record_recent_dir(recent: &Arc<Mutex<Vec<RecentDir>>>, cwd: &Path) {
         list.retain(|r| r.path != cwd);
         list.push(RecentDir {
             path: cwd.to_path_buf(),
-            dt: Utc::now(),
+            dt: Timestamp::now(),
         });
     }
 }
@@ -525,7 +525,7 @@ pub fn record_history(history: &mut Vec<HistoryItem>, text: &str, dir: &Path) {
     history.push(HistoryItem {
         text: text.to_string(),
         dir: dir.to_path_buf(),
-        dt: Utc::now(),
+        dt: Timestamp::now(),
     });
 }
 

@@ -16,7 +16,7 @@ exclude = ["vendor"]
 rustyline = { path = "vendor/rustyline" }
 
 [dependencies]
-chrono = "0.4.44"
+jiff = "1.0"
 
 # Hmm. What's this for?
 rustyline = "18.0.0"
